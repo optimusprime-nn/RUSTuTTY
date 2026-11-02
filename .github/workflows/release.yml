@@ -62,5 +62,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $pre = if ($env:GITHUB_REF_NAME.Contains('-')) { @('--prerelease') } else { @() }
+          $pre = @(if ($env:GITHUB_REF_NAME.Contains('-')) { '--prerelease' })
           gh release create $env:GITHUB_REF_NAME (Get-ChildItem out).FullName --verify-tag --generate-notes --title "RUSTuTTY $env:GITHUB_REF_NAME" @pre
