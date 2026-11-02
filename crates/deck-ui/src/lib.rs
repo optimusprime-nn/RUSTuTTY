@@ -131,6 +131,11 @@ pub fn remember(name: &str, value: u32) {
     }
 }
 
+/// Whether windows keep their size between runs, which they do unless turned off.
+pub fn saves_window_size() -> bool {
+    remembered("SaveWindowSize") != Some(0)
+}
+
 /// Changes the appearance. The caller repaints its windows with `restyle`.
 pub fn set_dark(on: bool) {
     DARK.store(on, Ordering::Relaxed);

@@ -1,5 +1,31 @@
 # RUSTuTTY
 
+[![Tests](https://github.com/optimusprime-nn/RUSTuTTY/actions/workflows/tests.yml/badge.svg)](https://github.com/optimusprime-nn/RUSTuTTY/actions/workflows/tests.yml)
+
+**All your terminal sessions in one window.** An unofficial rewrite of PuTTY in
+Rust for Windows, with PuTTY's settings, a session list down the left, and dark
+and light themes.
+
+![RUSTuTTY in dark mode](docs/dark.png)
+
+| Light | Settings |
+| --- | --- |
+| ![Light mode](docs/light.png) | ![The settings window](docs/settings.png) |
+
+## Download
+
+Get the installer or the portable zip from
+[Releases](https://github.com/optimusprime-nn/RUSTuTTY/releases). The installer
+is per-user and needs no administrator rights. It's unsigned for now, so Windows
+SmartScreen may warn about it: choose More info, then Run anyway. You can check
+a download against `SHA256SUMS.txt` in the same release.
+
+This is a beta. The automated tests are thorough, but some things still need
+more real-world use, including restarting SSH sessions and SSH special commands.
+Please report what you find in [Issues](https://github.com/optimusprime-nn/RUSTuTTY/issues).
+
+## What it is
+
 PuTTY's programs rewritten in Rust, with terminal sessions in one window, listed
 on the left. Every session runs inside one process. SSH and its cryptography come
 from [russh](https://crates.io/crates/russh), the terminal from
@@ -120,14 +146,26 @@ And some differ for other reasons:
 - Rich text copying keeps the text and font, not its colours
 - Resizing a session can't change its font
 
+## Following PuTTY
+
+A scheduled job checks PuTTY's main branch every day and lists new commits in an
+issue. Each one is reviewed, and what applies is ported by hand, so security
+fixes and new features can follow PuTTY while the code stays a separate rewrite.
+`.putty-reviewed` holds the last commit reviewed.
+
+## Releasing
+
+Set the version in `crates/rustutty`, `crates/deck-tools` and `crates/deck-setup`,
+then push a matching tag such as `v1.0.0`. The Release workflow tests and builds
+everything and publishes it. Add `-beta.1` or similar for a pre-release.
+
 ## Building
 
 Needs Rust and the Visual Studio 2022 Build Tools (C++).
 
     build.cmd
 
-The results are in `dist`. The installer is per-user and unsigned, so Windows
-SmartScreen may warn about it on another PC.
+The results are in `dist`.
 
 ## Testing
 
@@ -145,6 +183,7 @@ tools built, and no Pageant running.
 
 RUSTuTTY is an unofficial program, not connected with the PuTTY project. It
 follows PuTTY, copyright Simon Tatham and contributors, under the MIT
-licence: see `LICENCE`. It is unofficial, and not a PuTTY project release. russh
-and alacritty_terminal are under the Apache 2.0 licence; before redistributing
-the binaries, include their licence notices.
+licence: see `LICENCE`. It is unofficial, and not a PuTTY project release. The
+crates it's built on keep their own licences, and each release's `LICENCE.txt`
+includes their notices. A build of your own gets them by running
+`python scripts/notices.py` first.

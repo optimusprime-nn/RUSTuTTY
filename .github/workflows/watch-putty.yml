@@ -1,0 +1,54 @@
+# Each day, compares PuTTY's main branch with the last commit reviewed here, which
+# is in .putty-reviewed. New commits are listed in one open issue. Nothing is
+# copied: RUSTuTTY is a rewrite, so a change is ported by hand or not at all.
+name: Watch PuTTY
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  PUTTY: https://git.tartarus.org/simon/putty.git
+  LABEL: putty-upstream
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: List new commits
+        id: list
+        run: |
+          reviewed=$(cat .putty-reviewed)
+          git clone --quiet --bare --filter=blob:none --single-branch --branch main "$PUTTY" putty.git
+          head=$(git -C putty.git rev-parse HEAD)
+          echo "head=${head:0:8}" >> "$GITHUB_OUTPUT"
+          count=$(git -C putty.git rev-list --count "$reviewed..$head")
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          {
+            echo "PuTTY's main branch has $count commits that haven't been reviewed for RUSTuTTY."
+            echo
+            echo "Reviewed up to \`${reviewed:0:8}\`. Now at \`${head:0:8}\`."
+            echo
+            git -C putty.git log --reverse --max-count=200 --format='- `%h` %s' "$reviewed..$head"
+            echo
+            echo "Sort these into security fixes, changes RUSTuTTY needs, and C-only changes that don't apply. Then put the last reviewed commit in \`.putty-reviewed\` and close this issue."
+          } > body.md
+      - name: Open or update the issue
+        if: steps.list.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: New PuTTY commits, up to ${{ steps.list.outputs.head }}
+        run: |
+          gh label create "$LABEL" --force --color 2864C5 --description "Commits on PuTTY's main branch to review"
+          open=$(gh issue list --label "$LABEL" --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            gh issue edit "$open" --title "$TITLE" --body-file body.md
+          else
+            gh issue create --title "$TITLE" --label "$LABEL" --body-file body.md
+          fi

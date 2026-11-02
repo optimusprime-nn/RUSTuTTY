@@ -1,0 +1,20 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Core and tools
+        run: cargo test -p deck-core -p deck-tools --no-fail-fast
+      - name: Window
+        run: cargo test -p rustutty --features test-hooks

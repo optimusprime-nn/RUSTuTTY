@@ -59,6 +59,8 @@ pub enum Bind {
     Drop(&'static str, u32, &'static [(&'static str, u32)]),
     Clip(&'static str, &'static str),
     Prefs(Prefs),
+    /// `SaveWindowSize`, which belongs to the program and not to one session.
+    SaveSize,
     Font(&'static str),
     Host,
     Port,
@@ -480,6 +482,7 @@ pub fn build(mid: bool, protocol: &str, user: &str) -> Cbox {
     // RUSTuTTY's own
     b.check(s, "Warn before pasting several lines", 'p', flag("PasteWarnLines", true));
     b.check(s, "Resize the window to fit a new session", 'r', flag("FitWindow", false));
+    b.check(s, "Save window size on exit", 'z', Bind::SaveSize);
 
     // Window/Translation
     b.settitle("Window/Translation", "Options controlling character set translation");

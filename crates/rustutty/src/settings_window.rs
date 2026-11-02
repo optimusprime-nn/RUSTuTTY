@@ -123,6 +123,8 @@ struct Dlg {
     dpi: u32,
     /// The window's client area, in dialog units.
     size: (i32, i32),
+    /// Save window size on exit, stored only if the dialog isn't cancelled.
+    save_size: bool,
     /// Pixels in 4 dialog units across and 8 down.
     bx: i32,
     by: i32,
@@ -714,6 +716,9 @@ impl Dlg {
             Bind::Flag(k, d) => {
                 send(self.item(i, 0), BM_SETCHECK, self.settings.b(k, d) as usize, 0);
             }
+            Bind::SaveSize => {
+                send(self.item(i, 0), BM_SETCHECK, self.save_size as usize, 0);
+            }
             Bind::NotFlag(k, d) => {
                 send(self.item(i, 0), BM_SETCHECK, !self.settings.b(k, d) as usize, 0);
             }
@@ -939,6 +944,7 @@ impl Dlg {
             Bind::Int(k, _) => self.set(k, atoi(&text_of(h)) as u32),
             Bind::Fixed(k, _, denom) => self.set(k, (atof(&text_of(h)) * denom as f64) as i32 as u32),
             Bind::Flag(k, _) => self.set(k, (send(self.item(i, 0), BM_GETCHECK, 0, 0) == 1) as u32),
+            Bind::SaveSize => self.save_size = send(self.item(i, 0), BM_GETCHECK, 0, 0) == 1,
             Bind::NotFlag(k, _) => self.set(k, (send(self.item(i, 0), BM_GETCHECK, 0, 0) != 1) as u32),
             Bind::Radio(k, _, values) => self.set(k, values[self.radio(i)]),
             Bind::Host => {
@@ -1839,6 +1845,7 @@ fn run(owner: HWND, mid: bool, name: &str, settings: Settings) -> (bool, String,
         font: HFONT::default(),
         dpi: 96,
         size: (kept("SettingsWidth", WIDTH), kept("SettingsHeight", HEIGHT)),
+        save_size: deck_ui::saves_window_size(),
         bx: 6,
         by: 13,
         mid,
@@ -1911,7 +1918,10 @@ fn run(owner: HWND, mid: bool, name: &str, settings: Settings) -> (bool, String,
             }
         }
         let _ = EnableWindow(owner, true);
-        if !IsZoomed(hwnd).as_bool() {
+        if d.ended == Some(true) {
+            deck_ui::remember("SaveWindowSize", d.save_size as u32);
+        }
+        if deck_ui::saves_window_size() && !IsZoomed(hwnd).as_bool() {
             deck_ui::remember("SettingsWidth", d.size.0 as u32);
             deck_ui::remember("SettingsHeight", d.size.1 as u32);
         }
@@ -2237,6 +2247,25 @@ mod tests {
             },
         );
         with_script(|d| d.ended = Some(false), || assert!(reconfigure(HWND::default(), HFONT::default(), host("h")).is_none()));
+    }
+
+    #[test]
+    fn saving_the_window_size_is_on_until_it_is_turned_off() {
+        with_script(
+            |d| {
+                panel(d, "Window/Behaviour");
+                assert!(d.save_size);
+                let i = d.insts.iter().copied().find(|i| d.ctl(*i).bind == Bind::SaveSize).unwrap();
+                assert_eq!(send(d.item(i, 0), BM_GETCHECK, 0, 0), 1, "the box starts ticked");
+                send(d.item(i, 0), BM_SETCHECK, 0, 0);
+                d.changed(i);
+                assert!(!d.save_size);
+                assert!(d.settings.iter().all(|(k, _)| k != "SaveWindowSize"), "it's no session's setting");
+            },
+            || {
+                edit(HWND::default(), HFONT::default(), "s", host("example"));
+            },
+        );
     }
 
     #[test]

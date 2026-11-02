@@ -432,6 +432,43 @@ impl Deck {
         self.redraw();
     }
 
+    /// Keeps the window's size for next time, unaffected by the DPI it's on now.
+    fn save_window_size(&self) {
+        if !deck_ui::saves_window_size() {
+            return;
+        }
+        let mut p = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+        unsafe {
+            let _ = GetWindowPlacement(self.main, &mut p);
+        }
+        // Full screen keeps what the window was before it
+        let p = self.full_screen.as_ref().map_or(p, |f| f.0);
+        let r = p.rcNormalPosition;
+        let unscaled = |v: i32| (v * 96 / self.dpi as i32) as u32;
+        deck_ui::remember("WindowWidth", unscaled(r.right - r.left));
+        deck_ui::remember("WindowHeight", unscaled(r.bottom - r.top));
+        deck_ui::remember("WindowMaximised", (p.showCmd == SW_SHOWMAXIMIZED.0 as u32) as u32);
+    }
+
+    /// Puts back the size kept last time. Returns true if it was maximised.
+    fn restore_window_size(&self) -> bool {
+        if !deck_ui::saves_window_size() {
+            return false;
+        }
+        if let (Some(w), Some(h)) = (deck_ui::remembered("WindowWidth"), deck_ui::remembered("WindowHeight")) {
+            unsafe {
+                let monitor = MonitorFromWindow(self.main, MONITOR_DEFAULTTONEAREST);
+                let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+                let _ = GetMonitorInfoW(monitor, &mut info);
+                let work = info.rcWork;
+                let cx = self.px(w.clamp(480, 8000) as i32).min(work.right - work.left);
+                let cy = self.px(h.clamp(320, 8000) as i32).min(work.bottom - work.top);
+                let _ = SetWindowPos(self.main, None, 0, 0, cx, cy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+        deck_ui::remembered("WindowMaximised") == Some(1)
+    }
+
     fn redraw(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.content), None, false);
@@ -1740,6 +1777,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             let warn = |s: &&Session| !s.closed && s.target.settings.b("WarnOnClose", true);
             let live = d.sessions.iter().filter(warn).count();
             if live == 0 || d.confirm(&format!("Close RUSTuTTY and its {live} open sessions?")) {
+                d.save_window_size();
                 let _ = DestroyWindow(hwnd);
             }
         }
@@ -2023,10 +2061,11 @@ fn main() {
             SendMessageW(d.saved_list, LB_ADDSTRING, None, Some(LPARAM(text.as_ptr() as isize)));
         }
         d.system_items = GetMenuItemCount(Some(GetSystemMenu(main, false)));
+        let maximised = d.restore_window_size();
         d.layout();
         SetTimer(Some(content), TIMER_BLINK, BLINK_MS, None);
         // A test window must never take the keyboard from whoever is using this PC.
-        let _ = ShowWindow(main, if test { SW_SHOWNOACTIVATE } else { SW_SHOW });
+        let _ = ShowWindow(main, if test { SW_SHOWNOACTIVATE } else if maximised { SW_SHOWMAXIMIZED } else { SW_SHOW });
         if let Some(t) = parse_args(&d.saved) {
             d.open_target(t);
         }

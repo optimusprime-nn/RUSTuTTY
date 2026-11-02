@@ -1,0 +1,66 @@
+# A tag such as v1.0.0 tests, builds and publishes a release. A version with a
+# hyphen, such as v1.0.0-beta.1, is marked as a pre-release. Running this by hand
+# does everything but publish, and leaves the files on the run.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      DECK_EXE: ${{ github.workspace }}\target\release\rustutty.exe
+      DECK_TOOLS: ${{ github.workspace }}\target\release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find the version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (cargo pkgid -p rustutty) -replace '.*[@#]', ''
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME doesn't match version $version"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Core and tools
+        run: cargo test -p deck-core -p deck-tools --no-fail-fast
+      - name: Window
+        run: cargo test -p rustutty --features test-hooks
+      - name: Add third-party licences
+        run: python scripts/notices.py
+      - name: Build the programs
+        run: cargo build --release -p rustutty -p deck-tools
+      - name: Build the installer
+        run: cargo build --release -p deck-setup
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "RUSTuTTY-${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory out, $name | Out-Null
+          foreach ($file in 'rustutty', 'plink', 'pscp', 'psftp', 'puttygen', 'pageant') {
+            Copy-Item "target\release\$file.exe" $name
+          }
+          Copy-Item LICENCE "$name\LICENCE.txt"
+          Compress-Archive $name "out\$name-portable.zip"
+          Copy-Item target\release\setup.exe "out\$name-setup.exe"
+          Push-Location out
+          Get-ChildItem | ForEach-Object { "$((Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content -Encoding ascii SHA256SUMS.txt
+          Pop-Location
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: out
+      - name: Publish
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $pre = if ($env:GITHUB_REF_NAME.Contains('-')) { @('--prerelease') } else { @() }
+          gh release create $env:GITHUB_REF_NAME (Get-ChildItem out).FullName --verify-tag --generate-notes --title "RUSTuTTY $env:GITHUB_REF_NAME" @pre
