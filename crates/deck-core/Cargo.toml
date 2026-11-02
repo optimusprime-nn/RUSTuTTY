@@ -19,7 +19,7 @@ russh-sftp = "3"
 # ring instead of the default aws-lc-rs, which needs NASM to build on Windows
 russh = { version = "0.65", default-features = false, features = ["des", "flate2", "ring", "rsa"] }
 sha1 = "0.10"
-sha2 = "0.10"
+sha2 = "0.11"
 socket2 = "0.6"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-serial = "5.4"
