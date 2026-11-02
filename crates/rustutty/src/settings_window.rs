@@ -1130,7 +1130,7 @@ impl Dlg {
     fn action(&mut self, i: Inst) {
         match self.ctl(i).bind.clone() {
             Bind::About => about(self.hwnd),
-            Bind::Help => self.message(&format!("{APP} has no help file yet."), &format!("{APP} Help"), MB_ICONINFORMATION),
+            Bind::Help => crate::help(self.hwnd, "Settings.html"),
             Bind::HostCas => self.message(&format!("{APP} doesn't support host certification authorities yet."), APP, MB_ICONINFORMATION),
             Bind::Part(g, n) => self.part_action(g, n),
             _ => {}

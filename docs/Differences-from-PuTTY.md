@@ -32,7 +32,7 @@ The tools differ too:
 - `pageant` runs in a console with no tray icon.
 - The Rlogin window size is sent without waiting for the server's urgent
   request.
-- The window menu's **Help** isn't written yet. This documentation is the help.
+- **Help** opens this documentation in your browser, rather than a help file.
 
 ## Different on purpose, for safety
 

@@ -79,6 +79,7 @@ the same menu with **Close session** added.
 | Reset Terminal | Puts the terminal back as it was at the start |
 | Full Screen | Fills the screen with the terminal |
 | Light / Dark Appearance | Switches the theme |
+| Help | Opens this documentation in your browser |
 | About RUSTuTTY | The version and licence |
 
 ## The window's size

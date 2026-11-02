@@ -26,6 +26,7 @@ use windows::Win32::UI::Controls::{SetScrollInfo, ShowScrollBar, DRAWITEMSTRUCT,
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const EM_SETCUEBANNER: u32 = 0x1501;
@@ -925,7 +926,7 @@ impl Deck {
             }
             IDM_FULLSCREEN => self.toggle_full_screen(),
             IDM_THEME => self.toggle_theme(),
-            IDM_HELP => self.notice("RUSTuTTY Help", "RUSTuTTY has no help file yet. See the README."),
+            IDM_HELP => help(self.main, "Home.html"),
             IDM_ABOUT => self.notice("About RUSTuTTY", concat!("RUSTuTTY ", env!("CARGO_PKG_VERSION"), "\n\nPuTTY's programs rewritten in Rust.\nAn unofficial program, not connected with the PuTTY project.")),
             n if (IDM_SPECIAL_MIN..IDM_SPECIAL_MAX).contains(&n) => {
                 let special = self.current().and_then(|s| Some((s.tx.clone(), session::specials(&s.target.protocol).get((n - IDM_SPECIAL_MIN) / 0x10)?.1?)));
@@ -1937,6 +1938,19 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         _ => return DefWindowProcW(hwnd, msg, wp, lp),
     }
     LRESULT(0)
+}
+
+/// Opens a page of the documentation website in the default browser.
+fn help(owner: HWND, page: &str) {
+    if cfg!(feature = "test-hooks") {
+        return;
+    }
+    let url = wide(&format!("https://optimusprime-nn.github.io/RUSTuTTY/{page}"));
+    unsafe {
+        if ShellExecuteW(Some(owner), w!("open"), PCWSTR(url.as_ptr()), None, None, SW_SHOWNORMAL).0 as isize <= 32 {
+            deck_ui::tell(Some(owner), "RUSTuTTY Help", "The documentation couldn't be opened. It's at optimusprime-nn.github.io/RUSTuTTY", deck_ui::Tone::Info);
+        }
+    }
 }
 
 /// Target from `-ssh`, `-telnet`, `-raw`, `-P port`, `-l user`, `-load name` and a host.
