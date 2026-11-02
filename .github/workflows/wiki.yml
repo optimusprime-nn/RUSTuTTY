@@ -1,0 +1,43 @@
+# Copies the pages in docs to the wiki, so the two never disagree. Links lose
+# their .md, as the wiki wants, and pictures are served from the repository.
+name: Wiki
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**', '.github/workflows/wiki.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+jobs:
+  wiki:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy the docs into the wiki
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki
+          find wiki -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp docs/*.md wiki/
+          sed -i -E \
+            -e 's#\]\(([A-Za-z0-9-]+)\.md(\#[^)]*)?\)#](\1\2)#g' \
+            -e "s#\]\(([A-Za-z0-9-]+\.png)\)#](https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/docs/\1)#g" \
+            wiki/*.md
+          cd wiki
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo "The wiki is up to date."
+          else
+            git commit -m "Update from ${GITHUB_SHA::8}"
+            git push
+          fi

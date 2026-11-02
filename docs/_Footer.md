@@ -1,0 +1,1 @@
+These pages are copied from `docs` in the repository whenever it changes. To improve one, [edit it there](https://github.com/optimusprime-nn/RUSTuTTY/tree/main/docs): changes made here are overwritten.

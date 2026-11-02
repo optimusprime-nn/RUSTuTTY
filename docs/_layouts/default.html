@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+{% include head.html %}
+</head>
+<body>
+{% include header.html %}
+<div class="docs">
+  <nav class="side" aria-label="Documentation">
+    {% for group in site.data.nav %}
+    <p>{{ group.section }}</p>
+    {% for item in group.pages %}
+    <a href="{{ item.url | relative_url }}"{% if page.url == item.url %} aria-current="page"{% endif %}>{{ item.title }}</a>
+    {% endfor %}
+    {% endfor %}
+  </nav>
+  <main class="content">
+    {{ content }}
+    <p class="edit"><a href="https://github.com/{{ site.repository }}/edit/main/docs/{{ page.path }}">Improve this page</a></p>
+  </main>
+</div>
+{% include footer.html %}
+</body>
+</html>

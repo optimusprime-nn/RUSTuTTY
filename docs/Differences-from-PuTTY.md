@@ -1,0 +1,65 @@
+# Differences from PuTTY
+
+RUSTuTTY aims to do everything PuTTY does. Every one of PuTTY's saved settings
+is listed in `crates/deck-core/src/options.rs` as working, not applicable, or
+not done with the reason, and a test checks that list against PuTTY's own. A
+setting that isn't done is still kept, so a saved session loses nothing.
+
+## What it adds
+
+- All sessions in one window, listed down the left, with keyboard shortcuts to
+  move between them
+- Paste to all sessions at once
+- Dark and light themes
+- A resizable settings window, and the main window's size kept between runs
+
+## What isn't done
+
+These can't be done with the libraries RUSTuTTY is built on:
+
+- **GSSAPI and Kerberos login, SSH-1 and single DES.** russh, the SSH library,
+  doesn't have them. A session set to SSH-1 only is refused rather than
+  connected over SSH-2.
+- **Workarounds for old servers' bugs.** russh makes those choices itself, and
+  may refuse very old servers.
+- **Background colour erase, blinking text, right-to-left text, and PuTTY's
+  double-width and line-drawing options.** alacritty_terminal, the terminal
+  library, has no way to do them.
+
+The tools differ too:
+
+- `puttygen` is command line only. There's no key generator window.
+- `pageant` runs in a console with no tray icon.
+- The Rlogin window size is sent without waiting for the server's urgent
+  request.
+- The window menu's **Help** isn't written yet. This documentation is the help.
+
+## Different on purpose, for safety
+
+- Pasting several lines asks first, unless the program is using bracketed
+  paste. **PasteWarnLines** turns this off.
+- An HTTP proxy only gets a password if it offers Basic or Digest login, and
+  Basic shows a warning, because it sends the password readably.
+- `pscp -scp` refuses files other than the one asked for. Wildcards need
+  `-unsafe`.
+- A proxy or pre-connect command won't run if a host name, user name or
+  password it uses has a character `cmd.exe` would act on.
+- No tool takes `-pw`: a password on a command line can be read by other
+  programs.
+- Pageant is reached by its window message, not its named pipe.
+- `puttygen` asks for a passphrase on a new key and keeps a converted key's.
+  `--no-passphrase` writes one without.
+- Session logs hold what the host sent, not this end's prompts.
+- Hosts can't hold the display back with synchronized updates.
+
+## Different for other reasons
+
+- Algorithms PuTTY lists below "warn below here" aren't offered at all, because
+  russh has nowhere to stop and ask.
+- `Ctrl+Shift+C` and `Ctrl+Shift+V` always work, whatever **CtrlShiftCV** says.
+- Connection sharing works between sessions in one RUSTuTTY. It can't join a
+  connection held by a separate PuTTY, and forwardings on a joining session
+  aren't set up.
+- Copying as rich text keeps the text and font, not its colours.
+- Resizing a session can't change its font.
+- Plink's exit code isn't the remote command's.

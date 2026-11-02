@@ -6,6 +6,11 @@
 Rust for Windows, with PuTTY's settings, a session list down the left, and dark
 and light themes.
 
+**[Website](https://optimusprime-nn.github.io/RUSTuTTY/)** ·
+**[Documentation](https://optimusprime-nn.github.io/RUSTuTTY/Home.html)** ·
+**[Wiki](https://github.com/optimusprime-nn/RUSTuTTY/wiki)** ·
+**[Download](https://github.com/optimusprime-nn/RUSTuTTY/releases)**
+
 ![RUSTuTTY in dark mode](docs/dark.png)
 
 | Light | Settings |

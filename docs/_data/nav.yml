@@ -1,0 +1,16 @@
+- section: Using RUSTuTTY
+  pages:
+    - { title: Overview, url: /Home.html }
+    - { title: Installing, url: /Installing.html }
+    - { title: Getting started, url: /Getting-Started.html }
+    - { title: The window, url: /The-Window.html }
+    - { title: Settings, url: /Settings.html }
+    - { title: Command line, url: /Command-Line.html }
+    - { title: Tools, url: /Tools.html }
+- section: What to expect
+  pages:
+    - { title: Differences from PuTTY, url: /Differences-from-PuTTY.html }
+    - { title: Troubleshooting, url: /Troubleshooting.html }
+- section: Working on it
+  pages:
+    - { title: Building and testing, url: /Building-and-Testing.html }

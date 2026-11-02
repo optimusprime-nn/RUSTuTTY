@@ -1,0 +1,24 @@
+# The website, built by the Pages workflow from these same pages. The wiki gets
+# them too: see .github/workflows/wiki.yml.
+title: RUSTuTTY
+description: All your terminal sessions in one window. An unofficial rewrite of PuTTY in Rust for Windows.
+baseurl: /RUSTuTTY
+url: https://optimusprime-nn.github.io
+repository: optimusprime-nn/RUSTuTTY
+
+markdown: kramdown
+plugins:
+  - jekyll-relative-links
+  - jekyll-optional-front-matter
+  - jekyll-titles-from-headings
+relative_links:
+  enabled: true
+titles_from_headings:
+  enabled: true
+  strip_title: true
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default

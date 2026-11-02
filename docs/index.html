@@ -1,0 +1,70 @@
+---
+layout: landing
+title: RUSTuTTY
+---
+<main>
+  <section class="hero">
+    <p class="eyebrow">For Windows · Free and open source</p>
+    <h1>All your terminal sessions in one window.</h1>
+    <p class="lead">RUSTuTTY is PuTTY rewritten in Rust: the same settings, the same saved sessions and the same tools, with every session in one window, listed down the left.</p>
+    <p class="actions">
+      <a class="button primary" href="https://github.com/{{ site.repository }}/releases">Download</a>
+      <a class="button" href="{{ '/Getting-Started.html' | relative_url }}">Get started</a>
+    </p>
+    <p class="note">Beta · 64-bit Windows 10 and 11 · Installs per user, no administrator rights needed</p>
+    <img class="shot" src="{{ '/dark.png' | relative_url }}" alt="RUSTuTTY with an SSH session open, sessions listed on the left" width="1500" height="930">
+  </section>
+
+  <section class="features">
+    <div>
+      <h2>One window, every session</h2>
+      <p>Open sessions sit in a list on the left. Switch with a click or <kbd>Ctrl</kbd>+<kbd>Tab</kbd>, and paste into all of them at once.</p>
+    </div>
+    <div>
+      <h2>Your PuTTY sessions, untouched</h2>
+      <p>It reads the sessions and host keys PuTTY saved, and never changes them. PuTTY carries on exactly as before.</p>
+    </div>
+    <div>
+      <h2>Every PuTTY setting</h2>
+      <p>The settings window has PuTTY's pages in PuTTY's order. If you know where a setting is in PuTTY, it's in the same place.</p>
+    </div>
+    <div>
+      <h2>Dark and light</h2>
+      <p>A modern look in dark or light, with a settings window you can resize, and the window size kept between runs.</p>
+    </div>
+    <div>
+      <h2>The tools too</h2>
+      <p>Plink, PSCP, PSFTP, PuTTYgen and Pageant, with the same names and options, so your scripts keep working.</p>
+    </div>
+    <div>
+      <h2>Follows PuTTY</h2>
+      <p>PuTTY's main branch is checked every day, and its fixes and features are ported across.</p>
+    </div>
+  </section>
+
+  <section class="split">
+    <div>
+      <h2>Everything you connect with</h2>
+      <ul>
+        <li>SSH-2, Telnet, Rlogin, SUPDUP, raw and serial</li>
+        <li>Passwords, keys, certificates, Pageant and authentication plugins</li>
+        <li>Local, remote and dynamic port forwarding, and X11</li>
+        <li>SOCKS, HTTP, telnet, command and SSH proxies</li>
+        <li><code>.ppk</code> keys, versions 2 and 3, and OpenSSH keys</li>
+        <li>Logging, keepalives, environment variables, colours and fonts</li>
+      </ul>
+      <p><a href="{{ '/Differences-from-PuTTY.html' | relative_url }}">What's different from PuTTY</a></p>
+    </div>
+    <img src="{{ '/settings.png' | relative_url }}" alt="The settings window, with PuTTY's pages down the left" loading="lazy">
+  </section>
+
+  <section class="start">
+    <h2>Start in a minute</h2>
+    <ol>
+      <li><a href="https://github.com/{{ site.repository }}/releases">Download</a> the installer or the portable zip.</li>
+      <li>Type <code>user@host</code> at the top left and press <kbd>Enter</kbd>.</li>
+      <li>Or double-click a session you saved in PuTTY.</li>
+    </ol>
+    <p><a class="button" href="{{ '/Home.html' | relative_url }}">Read the documentation</a></p>
+  </section>
+</main>
