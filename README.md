@@ -1,6 +1,7 @@
-# RUSTuTTY
+# <img src="docs/assets/logo.png" alt="" width="40" height="40" align="top"> RUSTuTTY
 
 [![Tests](https://github.com/optimusprime-nn/RUSTuTTY/actions/workflows/tests.yml/badge.svg)](https://github.com/optimusprime-nn/RUSTuTTY/actions/workflows/tests.yml)
+[![Audit](https://github.com/optimusprime-nn/RUSTuTTY/actions/workflows/audit.yml/badge.svg)](https://github.com/optimusprime-nn/RUSTuTTY/actions/workflows/audit.yml)
 
 **All your terminal sessions in one window.** An unofficial rewrite of PuTTY in
 Rust for Windows, with PuTTY's settings, a session list down the left, and dark
