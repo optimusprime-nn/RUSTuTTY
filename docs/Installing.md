@@ -11,14 +11,25 @@ release has two downloads, which hold the same programs:
 
 ## The installer
 
-Run `RUSTuTTY-<version>-setup.exe` and confirm. It needs no administrator
-rights, because it installs into your own profile:
+Run `RUSTuTTY-<version>-setup.exe`. Its window says what it will install and
+where, and **Install** starts it. A progress bar shows the files being copied,
+and the window then says RUSTuTTY is installed, with a box to start it straight
+away. **Finish** closes it.
+
+It needs no administrator rights, because it installs into your own profile:
 
     %LOCALAPPDATA%\Programs\RUSTuTTY
 
 It puts `rustutty.exe`, `plink.exe`, `pscp.exe`, `psftp.exe`, `puttygen.exe`,
 `pageant.exe` and `LICENCE.txt` there, and adds RUSTuTTY to the Start menu.
-Running a newer setup over an older one upgrades it in place.
+
+### Upgrading
+
+Running a newer setup over an older one upgrades it in place: the window says
+which version you have and which you're getting, and the button reads
+**Upgrade**. Your sessions and settings are kept. Close RUSTuTTY first. If it's
+still running, setup says so and changes nothing, and **Try again** carries on
+once it's closed.
 
 For scripted installs:
 
