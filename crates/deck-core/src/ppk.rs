@@ -1,9 +1,9 @@
 //! PuTTY private key files (`.ppk`), versions 1 to 3, after `sshpubk.c`.
 
-use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use aes::cipher::{block_padding::NoPadding, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use anyhow::{anyhow, bail, ensure, Context};
 use argon2::{Algorithm, Argon2, Params, Version};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use russh::keys::{decode_secret_key, PrivateKey};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -136,11 +136,11 @@ fn mac_of(version: u32, key: &[u8], fields: &[&[u8]]) -> anyhow::Result<Vec<u8>>
         put_string(&mut data, f);
     }
     Ok(if version == 3 {
-        let mut m = <Hmac<Sha256> as Mac>::new_from_slice(key)?;
+        let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key)?;
         m.update(&data);
         m.finalize().into_bytes().to_vec()
     } else {
-        let mut m = <Hmac<Sha1> as Mac>::new_from_slice(key)?;
+        let mut m = <Hmac<Sha1> as KeyInit>::new_from_slice(key)?;
         m.update(&data);
         m.finalize().into_bytes().to_vec()
     })
@@ -201,7 +201,7 @@ impl Ppk {
         let (mac_key, encryption) = if self.encrypted {
             let (mut key, iv, mac) = cipher_material(self.version, self.argon.as_ref(), pass)?;
             ensure!(private.len() % 16 == 0, "the key file is damaged");
-            Decrypt::new_from_slices(&key, &iv)?.decrypt_padded_mut::<NoPadding>(&mut private).map_err(|_| anyhow!("the key file is damaged"))?;
+            Decrypt::new_from_slices(&key, &iv)?.decrypt_padded::<NoPadding>(&mut private).map_err(|_| anyhow!("the key file is damaged"))?;
             key.zeroize();
             (mac, "aes256-cbc")
         } else if self.version == 3 {
@@ -243,7 +243,7 @@ impl Ppk {
         let mac = mac_of(3, &mac_key, &fields)?;
         if encrypted {
             let len = private.len();
-            Encrypt::new_from_slices(&key, &iv)?.encrypt_padded_mut::<NoPadding>(&mut private, len).map_err(|_| anyhow!("encryption failed"))?;
+            Encrypt::new_from_slices(&key, &iv)?.encrypt_padded::<NoPadding>(&mut private, len).map_err(|_| anyhow!("encryption failed"))?;
         }
         let wrap = |data: &[u8]| -> (usize, String) {
             let b64 = crate::proxy::base64(data);

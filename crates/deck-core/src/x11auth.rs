@@ -1,6 +1,6 @@
 //! X11 login cookies, MIT and XDM-AUTHORIZATION-1, after PuTTY's `x11fwd.c`.
 
-use cbc::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cbc::cipher::{block_padding::NoPadding, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 
 type Decrypt = cbc::Decryptor<des::Des>;
 type Encrypt = cbc::Encryptor<des::Des>;
@@ -29,13 +29,13 @@ fn expand_key(k: &[u8]) -> [u8; 8] {
 pub fn encrypt(key: &[u8], block: &mut [u8]) {
     let len = block.len();
     if let Ok(c) = Encrypt::new_from_slices(&expand_key(key), &[0; 8]) {
-        let _ = c.encrypt_padded_mut::<NoPadding>(block, len);
+        let _ = c.encrypt_padded::<NoPadding>(block, len);
     }
 }
 
 pub fn decrypt(key: &[u8], block: &mut [u8]) {
     if let Ok(c) = Decrypt::new_from_slices(&expand_key(key), &[0; 8]) {
-        let _ = c.decrypt_padded_mut::<NoPadding>(block);
+        let _ = c.decrypt_padded::<NoPadding>(block);
     }
 }
 
