@@ -27,3 +27,16 @@ jobs:
           tool: cargo-audit@0.22.2
       - name: Check dependencies for advisories
         run: cargo audit --deny warnings --file Cargo.lock
+      # An accepted advisory stays ignored even after a fix ships, so this fails
+      # the run as soon as one has a fixed version, or is withdrawn
+      - name: Check accepted advisories still have no fix
+        run: |
+          fail=0
+          for id in $(grep -o 'RUSTSEC-[0-9]*-[0-9]*' .cargo/audit.toml | sort -u); do
+            file=$(find ~/.cargo/advisory-db/crates -name "$id.md" | head -1)
+            if [ -z "$file" ] || ! grep -q '^patched = \[\]' "$file"; then
+              echo "::error::$id now has a fix or was withdrawn: update the crate and take it out of .cargo/audit.toml"
+              fail=1
+            fi
+          done
+          exit $fail

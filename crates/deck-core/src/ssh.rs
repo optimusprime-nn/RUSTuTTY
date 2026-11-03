@@ -979,11 +979,20 @@ mod tests {
     }
 
     async fn ask_within(request: Vec<u8>, wait: Duration) -> anyhow::Result<(String, u16, bool)> {
+        ask_in_pieces(vec![request], wait).await
+    }
+
+    /// Sends each piece separately, with a pause between, as a slow client might.
+    async fn ask_in_pieces(pieces: Vec<Vec<u8>>, wait: Duration) -> anyhow::Result<(String, u16, bool)> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let client = tokio::spawn(async move {
             let mut c = TcpStream::connect(addr).await.unwrap();
-            let _ = c.write_all(&request).await;
+            c.set_nodelay(true).unwrap();
+            for piece in pieces {
+                let _ = c.write_all(&piece).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
             // keep the connection open until the parser is done with it
             let _ = c.read_u8().await;
         });
@@ -1013,6 +1022,20 @@ mod tests {
     async fn socks4_only_connects() {
         let e = ask(vec![4, 2, 0, 80, 127, 0, 0, 1, 0]).await.unwrap_err();
         assert!(e.to_string().contains("connect"), "{e}");
+    }
+
+    /// PuTTY d2590d98: an address arriving in parts must still be read whole.
+    #[tokio::test]
+    async fn a_socks5_request_in_pieces_is_read_whole() {
+        let mut ip6 = vec![0x20, 0x01, 0x0d, 0xb8];
+        ip6.extend([0; 11]);
+        ip6.push(1);
+        let pieces = vec![vec![5, 1, 0], vec![5, 1, 0, 4], ip6[..7].to_vec(), ip6[7..].to_vec(), vec![0], vec![22]];
+        assert_eq!(ask_in_pieces(pieces, SOCKS_WAIT).await.unwrap(), ("2001:db8::1".to_string(), 22, true));
+        let mut name = vec![5, 1, 0, 3, 12];
+        name.extend(b"examp");
+        let pieces = vec![vec![5, 1, 0], name, b"le.test".to_vec(), vec![0, 80]];
+        assert_eq!(ask_in_pieces(pieces, SOCKS_WAIT).await.unwrap(), ("example.test".to_string(), 80, true));
     }
 
     #[tokio::test]

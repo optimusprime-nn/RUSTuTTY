@@ -3,7 +3,7 @@
 ignore = [
     # The Marvin attack on the rsa crate, which russh uses. No fixed version
     # exists yet. RUSTuTTY only signs with RSA, once per login, and its Pageant
-    # only answers programs running as the same user. Tracked in issue #1:
-    # remove this line when a fix ships.
+    # only answers programs running as the same user. The Audit workflow fails
+    # once a fix ships: then update the crate and remove this line.
     "RUSTSEC-2023-0071",
 ]
