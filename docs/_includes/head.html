@@ -2,5 +2,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% if page.title and page.title != site.title %}{{ page.title }} · {% endif %}{{ site.title }}</title>
 <meta name="description" content="{{ site.description }}">
+<meta property="og:title" content="{% if page.title and page.title != site.title %}{{ page.title }} · {% endif %}{{ site.title }}">
+<meta property="og:description" content="{{ site.description }}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{ page.url | absolute_url }}">
+<meta property="og:image" content="{{ '/assets/social.png' | absolute_url }}">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="{{ '/assets/favicon.ico' | relative_url }}">
 <link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}">
