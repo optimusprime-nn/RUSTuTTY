@@ -73,6 +73,7 @@ still keeps them, so nothing is lost if you open it in PuTTY again.
 | Setting | Where | Default |
 | --- | --- | --- |
 | Save window size on exit | Window > Behaviour | On |
+| At least 10,000 lines of scrollback | Window, **Lines of scrollback** | Always: a session can ask for more, not fewer |
 | Light or dark appearance | The button at the top of the sidebar | Dark |
 
 ## Where settings are kept

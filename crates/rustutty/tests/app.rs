@@ -627,3 +627,33 @@ async fn the_window_has_a_scrollbar_that_follows_the_scrollback() {
     assert!(info.nMax > info.nPage as i32 + 100, "{info:?}");
     assert_eq!(info.nPos, info.nMax - info.nPage as i32 + 1, "the view starts at the bottom");
 }
+
+/// The wheel and the scrollbar move back through the scrollback.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_wheel_and_scrollbar_scroll_back() {
+    let peer = Peer::start().await;
+    let app = App::start(&[format!("raw://127.0.0.1:{}", peer.port)]);
+    peer.connected(1).await;
+    peer.send(0, &b"line\r\n".repeat(200));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let pos = || {
+        let mut info = SCROLLINFO { cbSize: std::mem::size_of::<SCROLLINFO>() as u32, fMask: SIF_ALL, ..Default::default() };
+        unsafe { GetScrollInfo(app.content, SB_VERT, &mut info).unwrap() };
+        info.nPos
+    };
+    let bottom = pos();
+    // one notch up, with the pointer over the terminal
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(app.content, &mut r).unwrap() };
+    let at = ((r.top + 20) as isize) << 16 | (r.left + 20) as isize & 0xffff;
+    app.post(app.content, WM_MOUSEWHEEL, (120usize) << 16, at);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(pos() < bottom, "the wheel scrolls back: {} -> {}", bottom, pos());
+    app.post(app.content, WM_VSCROLL, SB_PAGEUP.0 as usize, 0);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let paged = pos();
+    assert!(paged < bottom - 10, "the scrollbar pages back: {bottom} -> {paged}");
+    app.post(app.content, WM_MOUSEWHEEL, (-120i16 as u16 as usize) << 16, at);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(pos() > paged, "the wheel scrolls forward");
+}

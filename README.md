@@ -128,6 +128,9 @@ the server's urgent request.
 
 Some things differ on purpose, for safety:
 
+- Every session keeps at least 10,000 lines of scrollback, even a PuTTY session
+  saved with PuTTY's 2000, so a long install or log keeps its start
+
 - Pasting anything with a line end asks first, even one at the end of a single
   line, unless the program is using bracketed paste. `PasteWarnLines` turns
   this off

@@ -36,6 +36,10 @@ The tools differ too:
 
 ## Different on purpose, for safety
 
+- Every session keeps at least 10,000 lines of scrollback. PuTTY's saved
+  sessions usually ask for 2000, which a long install or log outgrows, so its
+  start would be lost. A session that asks for more gets more.
+
 - Pasting anything with a line end asks first, even a single line copied with
   its newline, unless the program is using bracketed paste. **Warn before
   pasting line ends** under Window > Behaviour turns this off.

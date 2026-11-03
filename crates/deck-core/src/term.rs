@@ -230,6 +230,16 @@ fn line_encoding(name: &str) -> &'static Encoding {
     Encoding::for_label(label.as_bytes()).unwrap_or(UTF_8)
 }
 
+/// The fewest lines of scrollback a session keeps. PuTTY's saved sessions
+/// usually ask for 2000, which a long install or log outgrows, losing its
+/// start. A session can ask for more, not less.
+pub const MIN_SCROLLBACK: u32 = 10_000;
+
+/// `ScrollbackLines`, at least `MIN_SCROLLBACK`.
+fn scrollback_lines(s: &Settings) -> usize {
+    s.i("ScrollbackLines", MIN_SCROLLBACK).clamp(MIN_SCROLLBACK, 1_000_000) as usize
+}
+
 impl Terminal {
     pub fn new(cols: usize, rows: usize) -> Terminal {
         Terminal::with_settings(cols, rows, &Settings::default())
@@ -238,7 +248,7 @@ impl Terminal {
     pub fn with_settings(cols: usize, rows: usize, s: &Settings) -> Terminal {
         let events = Listener::default();
         let config = Config {
-            scrolling_history: s.i("ScrollbackLines", 10_000).min(1_000_000) as usize,
+            scrolling_history: scrollback_lines(s),
             // A remote host must not be able to touch the clipboard.
             osc52: Osc52::Disabled,
             ..Config::default()
@@ -881,5 +891,112 @@ mod tests {
         t.feed("日a".as_bytes());
         let s = t.screen();
         assert!(s.rows[0][0].wide && !s.rows[0][2].wide);
+    }
+}
+
+#[cfg(test)]
+mod scrollback {
+    use super::*;
+
+/// Everything a user sees scrolling from the top to the bottom, a line at
+    /// a time: the top row at each step, then the last screen.
+    fn scrolled_text(t: &mut Terminal) -> String {
+        let (history, _) = t.scroll_position();
+        let rows = t.size().1;
+        let mut out = String::new();
+        for up in (1..=history).rev() {
+            t.scroll_to(up);
+            out += &t.row_text(0);
+            out.push('\n');
+        }
+        t.scroll_to(0);
+        for r in 0..rows {
+            out += &t.row_text(r);
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Which of lines `0..n` tagged `tag` can't be found by scrolling back,
+    /// or in Copy All.
+    fn missing(t: &mut Terminal, n: usize, tag: &str) -> Vec<usize> {
+        let (seen, copied) = (scrolled_text(t), t.all_text());
+        (0..n).filter(|i| !seen.contains(&format!("{tag}{i:04}x")) || !copied.contains(&format!("{tag}{i:04}x"))).collect()
+    }
+
+    #[test]
+    fn scrolling_back_shows_what_copy_all_copies() {
+        let mut t = term();
+        t.feed(&lines("S", 9000, 10));
+        let (seen, copied) = (scrolled_text(&mut t), t.all_text());
+        let seen_missing = (0..9000).filter(|i| !seen.contains(&format!("S{i:04}x"))).count();
+        let copied_missing = (0..9000).filter(|i| !copied.contains(&format!("S{i:04}x"))).count();
+        assert_eq!((seen_missing, copied_missing), (0, 0));
+    }
+
+    fn lines(tag: &str, n: usize, width: usize) -> Vec<u8> {
+        (0..n).flat_map(|i| format!("{tag}{i:04}x{}\r\n", "-".repeat(width)).into_bytes()).collect()
+    }
+
+    fn term() -> Terminal {
+        Terminal::with_settings(80, 24, &Settings::default())
+    }
+
+    #[test]
+    fn plain_output_is_all_kept() {
+        let mut t = term();
+        t.feed(&lines("A", 3000, 10));
+        assert_eq!(missing(&mut t, 3000, "A"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn apts_progress_line_loses_nothing_above_it() {
+        // apt keeps "Progress: [ 40%]" on the last line by scrolling only the lines above
+        let mut t = term();
+        t.feed(b"7[0;23r8");
+        for i in 0..500 {
+            t.feed(format!("B{i:04}x Setting up\r\n").as_bytes());
+            t.feed(b"7[24;0f[42mProgress: [ 40%][49m8");
+        }
+        t.feed(b"7[0;24r8[24;0f[J");
+        assert_eq!(missing(&mut t, 500, "B"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn clearing_the_screen_keeps_it_in_scrollback() {
+        let mut t = term();
+        t.feed(&lines("C", 100, 10));
+        t.feed(b"[H[2J");
+        t.feed(&lines("D", 10, 10));
+        assert_eq!(missing(&mut t, 100, "C"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_putty_session_keeps_at_least_ten_thousand_lines() {
+        let mut s = Settings::default();
+        s.set("ScrollbackLines", crate::settings::Value::Int(2000));
+        let mut t = Terminal::with_settings(80, 24, &s);
+        t.feed(&lines("H", 9000, 10));
+        assert_eq!(missing(&mut t, 9000, "H"), Vec::<usize>::new());
+        // a session that asks for more gets more
+        s.set("ScrollbackLines", crate::settings::Value::Int(20_000));
+        assert_eq!(scrollback_lines(&s), 20_000);
+    }
+
+    #[test]
+    fn long_lines_resizes_and_split_reads_lose_nothing() {
+        let mut t = term();
+        t.feed(&lines("E", 500, 200));
+        assert_eq!(missing(&mut t, 500, "E"), Vec::<usize>::new());
+        let mut t = term();
+        t.feed(&lines("F", 500, 10));
+        t.resize(60, 10);
+        t.resize(120, 40);
+        assert_eq!(missing(&mut t, 500, "F"), Vec::<usize>::new());
+        let mut t = term();
+        for c in lines("G", 1000, 30).chunks(7) {
+            t.feed(c);
+        }
+        assert_eq!(missing(&mut t, 1000, "G"), Vec::<usize>::new());
     }
 }
