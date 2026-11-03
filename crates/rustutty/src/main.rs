@@ -25,6 +25,7 @@ use windows::Win32::System::Diagnostics::Debug::{Beep, MessageBeep};
 use windows::Win32::UI::Controls::{SetScrollInfo, ShowScrollBar, DRAWITEMSTRUCT, NMHDR, ODS_FOCUS, ODS_SELECTED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::*;
+use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCompositionFontW, ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -175,6 +176,10 @@ struct Deck {
     wheel: i32,
     /// The key being handled is held down and repeating.
     key_repeat: bool,
+    /// Where the cursor was last drawn, for an input method's window.
+    caret: (i32, i32),
+    /// An input method is composing text.
+    composing: bool,
     focused: bool,
     started: std::time::Instant,
     cursor_off: bool,
@@ -271,8 +276,27 @@ fn map_key(vk: u16) -> Option<Key> {
         VK_BACK => Key::Backspace,
         VK_TAB => Key::Tab,
         VK_RETURN => Key::Enter,
+        VK_CLEAR => Key::Clear,
         VK_ESCAPE => Key::Escape,
         v if (VK_F1.0..=VK_F20.0).contains(&v.0) => Key::F((v.0 - VK_F1.0 + 1) as u8),
+        _ => return None,
+    })
+}
+
+/// The keypad key a navigation key is with Num Lock off.
+fn keypad_nav(vk: u16) -> Option<u8> {
+    Some(match VIRTUAL_KEY(vk) {
+        VK_INSERT => b'0',
+        VK_END => b'1',
+        VK_DOWN => b'2',
+        VK_NEXT => b'3',
+        VK_LEFT => b'4',
+        VK_CLEAR => b'5',
+        VK_RIGHT => b'6',
+        VK_HOME => b'7',
+        VK_UP => b'8',
+        VK_PRIOR => b'9',
+        VK_DELETE => b'.',
         _ => return None,
     })
 }
@@ -540,8 +564,9 @@ impl Deck {
             match code {
                 SB_LINEUP => s.term.scroll(1),
                 SB_LINEDOWN => s.term.scroll(-1),
-                SB_PAGEUP => s.term.scroll(page),
-                SB_PAGEDOWN => s.term.scroll(-page),
+                // PuTTY pages by half a screen
+                SB_PAGEUP => s.term.scroll((page / 2).max(1)),
+                SB_PAGEDOWN => s.term.scroll(-(page / 2).max(1)),
                 SB_THUMBTRACK | SB_THUMBPOSITION => s.term.scroll_to(history.saturating_sub(thumb)),
                 SB_TOP => s.term.scroll_to(history),
                 SB_BOTTOM => s.term.scroll_to_bottom(),
@@ -1193,8 +1218,13 @@ impl Deck {
             self.step(if shift { -1 } else { 1 });
             return true;
         }
+        // the keypad's own keys with Num Lock off still count as the keypad
+        // where PuTTY's "sanitize the number pad" says so; Num Lock on then
+        // means Shift was held to get them
+        let pad_nav = (!extended).then(|| keypad_nav(vk)).flatten().filter(|_| self.current().is_some_and(|s| s.keys.keypad_overrides_num_lock(s.term.app_keypad())));
+        let m = if pad_nav.is_some() && unsafe { GetKeyState(VK_NUMLOCK.0 as i32) } & 1 != 0 { Mods { shift: true, ..m } } else { m };
         // Shift+Num Lock is left to Windows, as in PuTTY
-        if let Some(pad) = keypad_key(vk, extended).filter(|&p| !(p == b'G' && shift)) {
+        if let Some(pad) = pad_nav.or_else(|| keypad_key(vk, extended)).filter(|&p| !(p == b'G' && shift)) {
             let repeat = self.key_repeat;
             if let Some(s) = self.current() {
                 let bytes = s.keys.keypad(pad, m, s.term.app_keypad());
@@ -1246,14 +1276,49 @@ impl Deck {
             Shortcut::GoTo(i) => self.select(i),
             Shortcut::PassThrough => {
                 let Some(s) = self.current() else { return false };
-                if shift && vk == VK_PRIOR.0 {
-                    let page = s.term.size().1 as i32;
-                    s.term.scroll(page);
-                } else if shift && vk == VK_NEXT.0 {
-                    let page = s.term.size().1 as i32;
-                    s.term.scroll(-page);
+                // Ctrl without either Alt: AltGr, which layouts report with
+                // Ctrl, makes characters and is left alone
+                let alt_held = unsafe { GetKeyState(VK_MENU.0 as i32) } < 0;
+                let only_ctrl = ctrl && !shift && !alt_held;
+                // PuTTY's control characters for keys that have no letter
+                let control = match vk {
+                    v if only_ctrl && (b'2' as u16..=b'8' as u16).contains(&v) => Some(b"\x00\x1b\x1c\x1d\x1e\x1f\x7f"[(v - b'2' as u16) as usize]),
+                    0xBD | 0xBF if only_ctrl => Some(0x1f),
+                    0xDC | 0xDF if only_ctrl => Some(0x1c),
+                    0xDE if ctrl && shift && !alt_held => Some(0x1e),
+                    _ => None,
+                };
+                let half = (s.term.size().1 as i32 / 2).max(1);
+                if let Some(c) = control {
+                    s.send(vec![c]);
+                } else if vk == VK_PRIOR.0 && (shift || ctrl) {
+                    // Shift: half a screen; Ctrl: a line; both: the top
+                    match (shift, ctrl) {
+                        (true, false) => s.term.scroll(half),
+                        (false, true) => s.term.scroll(1),
+                        _ => s.term.scroll_to(s.term.scroll_position().0),
+                    }
+                } else if vk == VK_NEXT.0 && (shift || ctrl) {
+                    match (shift, ctrl) {
+                        (true, false) => s.term.scroll(-half),
+                        (false, true) => s.term.scroll(-1),
+                        _ => s.term.scroll_to_bottom(),
+                    }
                 } else if ctrl && vk == VK_SPACE.0 {
-                    s.send(vec![0]);
+                    // Ctrl+Shift+Space is a no-break space, as in PuTTY
+                    let bytes = if shift { s.term.encode_text("\u{a0}") } else { vec![0] };
+                    s.send(bytes);
+                } else if vk == VK_PAUSE.0 && ctrl {
+                    s.term.toggle_app_keypad();
+                } else if vk == VK_PAUSE.0 {
+                    s.send(vec![26]);
+                } else if vk == VK_CANCEL.0 && ctrl {
+                    // Ctrl+Break: a break, where the protocol has one
+                    if session::specials(&s.target.protocol).iter().any(|(_, sp)| *sp == Some(session::Special::Break)) {
+                        let _ = s.tx.send(Command::Special(session::Special::Break));
+                    }
+                } else if vk == VK_RETURN.0 && !shift && !ctrl && s.term.newline_mode() {
+                    s.send(b"\r\n".to_vec());
                 } else if let Some(key) = map_key(vk) {
                     let mut bytes = s.keys.encode(key, m, s.term.app_cursor());
                     if m.alt && !s.keys.alt_included(key) {
@@ -1508,6 +1573,23 @@ impl Deck {
             }
         }
         self.redraw();
+    }
+
+    /// Puts an input method's composition at the cursor, in the terminal's font.
+    fn place_ime(&self) {
+        unsafe {
+            let imc = ImmGetContext(self.content);
+            if imc.0.is_null() {
+                return;
+            }
+            let form = COMPOSITIONFORM { dwStyle: CFS_POINT, ptCurrentPos: POINT { x: self.caret.0, y: self.caret.1 }, ..Default::default() };
+            let _ = ImmSetCompositionWindow(imc, &form);
+            let mut lf = LOGFONTW::default();
+            if GetObjectW(self.font.into(), std::mem::size_of::<LOGFONTW>() as i32, Some(&mut lf as *mut LOGFONTW as *mut _)) != 0 {
+                let _ = ImmSetCompositionFontW(imc, &lf);
+            }
+            let _ = ImmReleaseContext(self.content, imc);
+        }
     }
 
     /// Counts this press as the first, second or third click in a row: quick
@@ -1822,6 +1904,12 @@ impl Deck {
             SelectObject(dc, old);
             if let Some((cx, cy)) = screen.cursor {
                 let (left, top) = (cx as i32 * cw + origin, cy as i32 * ch + origin);
+                if self.caret != (left, top) {
+                    self.caret = (left, top);
+                    if self.composing {
+                        self.place_ime();
+                    }
+                }
                 let r = RECT { left, top, right: left + cw, bottom: top + ch };
                 let b = CreateSolidBrush(rgb(cursor_colour));
                 if !self.focused {
@@ -1988,6 +2076,16 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_KILLFOCUS => {
             d.focused = false;
             d.redraw();
+        }
+        // an input method writes at the cursor, in the terminal's font, as in PuTTY
+        WM_IME_STARTCOMPOSITION => {
+            d.composing = true;
+            d.place_ime();
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        WM_IME_ENDCOMPOSITION => {
+            d.composing = false;
+            return DefWindowProcW(hwnd, msg, wp, lp);
         }
         WM_GETDLGCODE => return LRESULT(DLGC_WANTALLKEYS as isize),
         WM_KEYDOWN => {
@@ -2193,7 +2291,7 @@ fn main() {
             cell: (8, 16), dpi: GetDpiForWindow(main).max(96), font_in_use: (String::new(), 0),
             sessions: Vec::new(), active: None, next_id: 1, saved,
             inbox: Default::default(), rt, store,
-            skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), clicks: (std::time::Instant::now(), 0, LPARAM(0)), wheel: 0, key_repeat: false, focused: false,
+            skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), clicks: (std::time::Instant::now(), 0, LPARAM(0)), wheel: 0, key_repeat: false, caret: (0, 0), composing: false, focused: false,
             started: std::time::Instant::now(), cursor_off: false, flash: false, pointer_hidden: false, compose_state: 0, compose_first: 0, full_screen: None, close_held: None, system_items: 0,
         }));
         DECK.store(d, Ordering::Release);

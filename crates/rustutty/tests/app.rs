@@ -670,6 +670,79 @@ async fn double_and_triple_clicks() {
     }
 }
 
+/// PuTTY's keys with no letter of their own: Ctrl+2 to Ctrl+8, Ctrl+- and
+/// Ctrl+Shift+' send control characters, and Pause sends Ctrl+Z.
+#[tokio::test(flavor = "multi_thread")]
+async fn keys_that_send_control_characters() {
+    let peer = Peer::start().await;
+    let app = App::start(&raw_args(peer.port));
+    peer.connected(1).await;
+    for (vk, flags, want) in [(b'2', CTRL, 0x00u8), (b'6', CTRL, 0x1e), (b'8', CTRL, 0x7f), (0xBD, CTRL, 0x1f), (0xDC, CTRL, 0x1c), (0xDE, CTRL | SHIFT, 0x1e), (VK_PAUSE.0 as u8, 0, 0x1a)] {
+        let before = peer.received(0).len();
+        app.key(vk, flags);
+        let end = Instant::now() + Duration::from_secs(5);
+        while peer.received(0).len() == before {
+            assert!(Instant::now() < end, "key {vk:#x} sent nothing");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(peer.received(0)[before..], [want], "key {vk:#x}");
+    }
+}
+
+/// In application keypad mode the keypad sends keypad codes with Num Lock
+/// off too, and in newline mode Return sends CR LF.
+#[tokio::test(flavor = "multi_thread")]
+async fn keypad_and_return_follow_the_hosts_modes() {
+    let peer = Peer::start().await;
+    let app = App::start(&raw_args(peer.port));
+    peer.connected(1).await;
+    // these test keys come as the keypad's own, not the separate arrow keys
+    app.key(VK_UP.0 as u8, 0);
+    peer.wait(0, b"\x1b[A").await;
+    peer.send(0, b"x\x1b=\x1b[20h");
+    app.sees("row=x").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let before = peer.received(0).len();
+    app.key(VK_UP.0 as u8, 0);
+    app.key(VK_CLEAR.0 as u8, 0);
+    app.key(VK_RETURN.0 as u8, 0);
+    let end = Instant::now() + Duration::from_secs(5);
+    let want = b"\x1bOx\x1bOu\r\n";
+    while peer.received(0).len() < before + want.len() {
+        assert!(Instant::now() < end, "have {:?}", String::from_utf8_lossy(&peer.received(0)[before..]));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(&peer.received(0)[before..], want);
+}
+
+/// Shift+PgUp scrolls half a screen, Ctrl+PgUp a line, and Ctrl+Shift+PgUp
+/// and PgDn go to the top and bottom, as in PuTTY.
+#[tokio::test(flavor = "multi_thread")]
+async fn page_keys_scroll_as_putty_does() {
+    let peer = Peer::start().await;
+    let app = App::start(&raw_args(peer.port));
+    peer.connected(1).await;
+    peer.send(0, &b"line\r\n".repeat(200));
+    app.sees("row=line").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let pos = || {
+        let mut info = SCROLLINFO { cbSize: std::mem::size_of::<SCROLLINFO>() as u32, fMask: SIF_ALL, ..Default::default() };
+        unsafe { GetScrollInfo(app.content, SB_VERT, &mut info).unwrap() };
+        (info.nPos, info.nPage as i32)
+    };
+    let (bottom, page) = pos();
+    let after = |vk: VIRTUAL_KEY, flags: isize| {
+        app.key(vk.0 as u8, flags);
+        std::thread::sleep(Duration::from_millis(150));
+        pos().0
+    };
+    assert_eq!(after(VK_PRIOR, SHIFT), bottom - page / 2, "Shift+PgUp: half a screen");
+    assert_eq!(after(VK_PRIOR, CTRL), bottom - page / 2 - 1, "Ctrl+PgUp: one line");
+    assert_eq!(after(VK_NEXT, CTRL), bottom - page / 2, "Ctrl+PgDn: one line back");
+    assert_eq!(after(VK_PRIOR, CTRL | SHIFT), 0, "Ctrl+Shift+PgUp: the top");
+    assert_eq!(after(VK_NEXT, CTRL | SHIFT), bottom, "Ctrl+Shift+PgDn: the bottom");
+}
+
 /// Alt and a character sends ESC and the character, by the same path as
 /// typing, so a character outside the basic plane arrives whole.
 #[tokio::test(flavor = "multi_thread")]

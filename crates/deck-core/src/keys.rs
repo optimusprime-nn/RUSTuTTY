@@ -18,6 +18,8 @@ pub enum Key {
     Tab,
     Enter,
     Escape,
+    /// The keypad's 5 with Num Lock off.
+    Clear,
     F(u8),
 }
 
@@ -146,6 +148,13 @@ impl KeyConfig {
         }
     }
 
+    /// Whether the keypad's keys send keypad codes even with Num Lock off,
+    /// as PuTTY's "sanitize the number pad": in application keypad mode, the
+    /// VT400 style, and NetHack mode.
+    pub fn keypad_overrides_num_lock(&self, app_keypad: bool) -> bool {
+        (app_keypad && !self.no_app_keypad && self.funky != FUNKY_XTERM) || self.funky == FUNKY_VT400 || self.nethack
+    }
+
     /// The bytes a key sends.
     pub fn encode(&self, key: Key, m: Mods, app_cursor: bool) -> Vec<u8> {
         match key {
@@ -165,6 +174,8 @@ impl KeyConfig {
             Key::Tab => vec![b'\t'],
             Key::Enter => vec![b'\r'],
             Key::Escape => vec![0x1b],
+            // PuTTY's "close enough"
+            Key::Clear => self.arrow(b'G', m, app_cursor),
             Key::F(n) => self.function(n, m),
         }
     }

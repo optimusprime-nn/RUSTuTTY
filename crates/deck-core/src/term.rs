@@ -653,6 +653,17 @@ impl Terminal {
         self.term.mode().contains(TermMode::APP_KEYPAD)
     }
 
+    /// Line feed/new line mode (`CSI 20 h`): Return sends CR LF.
+    pub fn newline_mode(&self) -> bool {
+        self.term.mode().contains(TermMode::LINE_FEED_NEW_LINE)
+    }
+
+    /// Ctrl+Pause: application keypad mode on or off, from this end.
+    pub fn toggle_app_keypad(&mut self) {
+        let seq: &[u8] = if self.app_keypad() { b"\x1b>" } else { b"\x1b=" };
+        self.parser.advance(&mut self.term, seq);
+    }
+
     pub fn screen(&self) -> Screen {
         let content = self.term.renderable_content();
         let (cols, lines) = self.size();
