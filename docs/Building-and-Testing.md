@@ -43,6 +43,15 @@ running.
 
 GitHub runs the first two on every push and pull request.
 
+The **Audit** workflow checks `Cargo.lock` against the
+[RustSec advisory database](https://rustsec.org) whenever the dependencies
+change, and every day. To run it yourself:
+
+    cargo install cargo-audit
+    cargo audit --deny warnings
+
+An advisory accepted for now, with the reason, goes in `.cargo/audit.toml`.
+
 ## Following PuTTY
 
 The **Watch PuTTY** workflow checks PuTTY's main branch every day and lists new
