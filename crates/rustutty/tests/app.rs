@@ -518,6 +518,51 @@ async fn a_dropped_connection_leaves_the_session_readable() {
     assert!(d.contains("label0=(ended) 127.0.0.1"));
 }
 
+/// The Event Log is a window of its own, with times on its lines, and it
+/// keeps up while it's open.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_event_log_window_keeps_up() {
+    let p = Peer::start().await;
+    let app = App::start(&raw_args(p.port));
+    app.until("first", |d| d.contains("sessions=1")).await;
+    p.connected(1).await;
+    // 0x10 is the window menu's Event Log
+    app.post(app.main, WM_SYSCOMMAND, 0x10, 0);
+    app.until("the Event Log open", |d| d.contains("eventlog=true")).await;
+    let log_text = || {
+        let mut all: Vec<isize> = Vec::new();
+        unsafe {
+            let _ = EnumWindows(Some(collect), LPARAM(&mut all as *mut _ as isize));
+        }
+        let window = all.into_iter().map(|h| HWND(h as *mut _)).find(|&h| {
+            let mut pid = 0;
+            unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+            pid == app.child.id() && class_of(h) == "RUSTuTTYLog"
+        })?;
+        let edit = children(window).into_iter().find(|&h| class_of(h) == "Edit")?;
+        // another process's edit box has to be asked for its text
+        let mut b = vec![0u16; 8192];
+        let n = unsafe { SendMessageW(edit, WM_GETTEXT, Some(WPARAM(b.len())), Some(LPARAM(b.as_mut_ptr() as isize))) }.0 as usize;
+        Some(String::from_utf16_lossy(&b[..n]))
+    };
+    let wait_for = |want: String| async move {
+        let end = Instant::now() + Duration::from_secs(8);
+        loop {
+            let text = log_text().unwrap_or_default();
+            if text.contains(&want) {
+                return text;
+            }
+            assert!(Instant::now() < end, "{want:?} not in the Event Log: {text:?}");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    };
+    let text = wait_for(format!("Connecting to 127.0.0.1 port {}", p.port)).await;
+    let first = text.lines().next().unwrap();
+    assert!(first.len() > 20 && first.as_bytes()[4] == b'-' && first.contains('\t'), "a time in front: {first:?}");
+    p.out.lock().unwrap().clear();
+    wait_for("Connection closed by remote host".into()).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ssh_session_from_login_to_exit() {
     let key = server::new_key(Algorithm::Ed25519);

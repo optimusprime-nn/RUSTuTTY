@@ -22,7 +22,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODEFAULT};
 use windows::Win32::System::Diagnostics::Debug::{Beep, MessageBeep};
-use windows::Win32::UI::Controls::{SetScrollInfo, ShowScrollBar, DRAWITEMSTRUCT, NMHDR, ODS_FOCUS, ODS_SELECTED};
+use windows::Win32::UI::Controls::{SetScrollInfo, ShowScrollBar, EM_SCROLLCARET, EM_SETSEL, DRAWITEMSTRUCT, NMHDR, ODS_FOCUS, ODS_SELECTED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCompositionFontW, ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM};
@@ -184,6 +184,10 @@ struct Deck {
     caret: (i32, i32),
     /// An input method is composing text.
     composing: bool,
+    /// The Event Log window, if it's open, and whose log it shows.
+    event_log: Option<(HWND, u64)>,
+    /// The size tip, while the window's frame is being dragged.
+    size_tip: Option<HWND>,
     focused: bool,
     started: std::time::Instant,
     cursor_off: bool,
@@ -204,6 +208,73 @@ static DECK: AtomicPtr<Deck> = AtomicPtr::new(std::ptr::null_mut());
 /// re-enter each other, so this is a raw pointer rather than a RefCell.
 fn deck() -> Option<&'static mut Deck> {
     unsafe { DECK.load(Ordering::Acquire).as_mut() }
+}
+
+// The Event Log window's controls
+const LOG_TEXT: usize = 1;
+const LOG_COPY: usize = 2;
+const LOG_CLOSE: usize = 3;
+
+/// An Event Log line with the local time in front, as PuTTY writes them.
+fn stamped(text: &str) -> String {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}\t{text}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
+}
+
+/// The log fills the Event Log window, with its buttons along the bottom.
+fn layout_event_log(h: HWND) {
+    unsafe {
+        let mut r = RECT::default();
+        let _ = GetClientRect(h, &mut r);
+        let px = |v: i32| v * GetDpiForWindow(h).max(96) as i32 / 96;
+        let (pad, bw, bh) = (px(10), px(92), px(28));
+        let place = |id: usize, x: i32, y: i32, w: i32, hh: i32| {
+            if let Ok(c) = GetDlgItem(Some(h), id as i32) {
+                let _ = SetWindowPos(c, None, x, y, w.max(0), hh.max(0), SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        };
+        let buttons_y = r.bottom - pad - bh;
+        place(LOG_TEXT, pad, pad, r.right - pad * 2, buttons_y - pad * 2);
+        place(LOG_CLOSE, r.right - pad - bw, buttons_y, bw, bh);
+        place(LOG_COPY, r.right - pad * 2 - bw * 2, buttons_y, bw, bh);
+    }
+}
+
+unsafe extern "system" fn event_log_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_SIZE => layout_event_log(hwnd),
+        WM_COMMAND if wp.0 & 0xffff == LOG_COPY => {
+            if let Ok(edit) = GetDlgItem(Some(hwnd), LOG_TEXT as i32) {
+                let mut buf = vec![0u16; GetWindowTextLengthW(edit) as usize + 1];
+                let n = GetWindowTextW(edit, &mut buf) as usize;
+                clipboard::set(&String::from_utf16_lossy(&buf[..n]));
+            }
+        }
+        WM_COMMAND if wp.0 & 0xffff == LOG_CLOSE => {
+            let _ = DestroyWindow(hwnd);
+        }
+        WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORBTN => {
+            return match deck_ui::ctl_colour(msg, wp, lp) {
+                Some(answer) => LRESULT(answer),
+                None => DefWindowProcW(hwnd, msg, wp, lp),
+            };
+        }
+        WM_ERASEBKGND => {
+            let mut r = RECT::default();
+            let _ = GetClientRect(hwnd, &mut r);
+            deck_ui::fill(HDC(wp.0 as *mut _), &r, deck_ui::palette().bg);
+            return LRESULT(1);
+        }
+        WM_DESTROY => {
+            if let Some(d) = deck() {
+                if d.event_log.is_some_and(|(h, _)| h == hwnd) {
+                    d.event_log = None;
+                }
+            }
+        }
+        _ => return DefWindowProcW(hwnd, msg, wp, lp),
+    }
+    LRESULT(0)
 }
 
 /// `UseSystemColours`: Windows' own text and background colours.
@@ -482,10 +553,62 @@ impl Deck {
             }
             if s.term.size() != (cols as usize, rows as usize) {
                 s.term.resize(cols as usize, rows as usize);
-                let _ = s.tx.send(Command::Resize { cols, rows });
+                // while the frame is being dragged the host hears only the
+                // size it ends at, as in PuTTY
+                if self.size_tip.is_none() {
+                    let _ = s.tx.send(Command::Resize { cols, rows });
+                }
             }
         }
+        if let Some(tip) = self.size_tip {
+            self.show_size_tip(tip, cols, rows);
+        }
         self.redraw();
+    }
+
+    /// PuTTY's size tip: the terminal's columns and rows by the window while
+    /// its frame is dragged.
+    fn show_size_tip(&self, tip: HWND, cols: u32, rows: u32) {
+        unsafe {
+            let text = wide(&format!("{cols}x{rows}"));
+            let _ = SetWindowTextW(tip, PCWSTR(text.as_ptr()));
+            let mut r = RECT::default();
+            let _ = GetWindowRect(self.main, &mut r);
+            let (w, h) = (self.px(84), self.px(26));
+            let _ = SetWindowPos(tip, Some(HWND_TOPMOST), r.left + (r.right - r.left - w) / 2, r.top + self.px(40), w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+    }
+
+    /// A drag of the frame starts: the size tip comes up.
+    fn sizing_starts(&mut self) {
+        if self.size_tip.is_some() || cfg!(feature = "test-hooks") {
+            return;
+        }
+        unsafe {
+            let instance: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
+            // SS_CENTER and SS_CENTERIMAGE: the text in the middle both ways
+            let style = WS_POPUP | WS_BORDER | WINDOW_STYLE(0x1 | 0x200);
+            if let Ok(tip) = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, w!("STATIC"), w!(""), style, 0, 0, 0, 0, Some(self.main), None, Some(instance), None) {
+                SendMessageW(tip, WM_SETFONT, Some(WPARAM(self.gui_font.0 as usize)), Some(LPARAM(0)));
+                self.size_tip = Some(tip);
+                let (cols, rows) = self.grid();
+                self.show_size_tip(tip, cols, rows);
+            }
+        }
+    }
+
+    /// The drag is over: the tip goes, and every session's host hears its size.
+    fn sizing_ends(&mut self) {
+        let Some(tip) = self.size_tip.take() else { return };
+        unsafe {
+            let _ = DestroyWindow(tip);
+        }
+        for s in &self.sessions {
+            if s.target.settings.i("LockSize", 0) != 1 {
+                let (cols, rows) = s.term.size();
+                let _ = s.tx.send(Command::Resize { cols: cols as u32, rows: rows as u32 });
+            }
+        }
     }
 
     /// Keeps the window's size for next time, unaffected by the DPI it's on now.
@@ -733,7 +856,9 @@ impl Deck {
         let (id, tx) = self.connect(&target);
         let s = &mut self.sessions[i];
         (s.id, s.tx, s.closed) = (id, tx, false);
-        s.log.push("----- Session restarted -----".to_string());
+        s.log.push(stamped("Session restarted"));
+        self.refresh_event_log();
+        let s = &mut self.sessions[i];
         s.term.soft_reset();
         s.term.feed(b"\r\n");
         self.refresh_list();
@@ -898,18 +1023,21 @@ impl Deck {
         let mut bells = Vec::new();
         let mut flash = false;
         let mut window_ops = Vec::new();
+        let mut logged = false;
         let active_id = self.current().map(|s| s.id);
         for (id, event) in events {
             let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) else { continue };
             match event {
                 Event::Output(bytes) => s.term.feed(&bytes),
-                Event::Local(bytes) => {
-                    let text = String::from_utf8_lossy(&bytes);
-                    s.log.extend(text.lines().map(deck_core::session::clean).filter(|l| !l.trim().is_empty()));
-                    s.term.feed(&bytes);
+                // prompts and what's typed into them stay out of the Event Log
+                Event::Local(bytes) => s.term.feed(&bytes),
+                Event::Log(line) => {
+                    s.log.push(stamped(&deck_core::session::clean(&line)));
+                    logged = true;
                 }
                 Event::Closed(why, clean) => {
-                    s.log.push(deck_core::session::clean(&why));
+                    s.log.push(stamped(&deck_core::session::clean(&why)));
+                    logged = true;
                     s.term.stop_printing();
                     s.job = None;
                     s.term.feed(format!("\r\n\x1b[1m[{}]\x1b[0m\r\n", deck_core::session::clean(&why)).as_bytes());
@@ -980,6 +1108,9 @@ impl Deck {
         }
         for numbers in window_ops {
             self.window_op(&numbers);
+        }
+        if logged {
+            self.refresh_event_log();
         }
         for id in finished {
             if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
@@ -1060,10 +1191,7 @@ impl Deck {
     /// A command from the window menu. Returns false if it isn't one.
     fn window_command(&mut self, id: usize) -> bool {
         match id {
-            IDM_SHOWLOG => {
-                let log = self.current().map_or(String::new(), |s| s.log.join("\n"));
-                self.notice("RUSTuTTY Event Log", if log.is_empty() { "Nothing logged." } else { &log });
-            }
+            IDM_SHOWLOG => self.show_event_log(),
             IDM_NEWSESS => self.edit_saved(None),
             IDM_DUPSESS => {
                 if let Some(t) = self.current().map(|s| s.target.clone()) {
@@ -1725,6 +1853,52 @@ impl Deck {
         self.redraw();
     }
 
+    /// PuTTY's Event Log: a window of its own beside the terminal, for the
+    /// session showing when it was opened, kept up to date as lines arrive.
+    fn show_event_log(&mut self) {
+        let Some((id, label)) = self.current().map(|s| (s.id, s.label())) else { return };
+        unsafe {
+            if let Some((h, _)) = self.event_log.take() {
+                let _ = DestroyWindow(h);
+            }
+            let instance: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
+            let title = wide(&format!("{label} Event Log"));
+            // test windows open off-screen and never take the focus
+            let (x, ex) = if cfg!(feature = "test-hooks") { (-4000, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) } else { (CW_USEDEFAULT, WINDOW_EX_STYLE(0)) };
+            let Ok(h) = CreateWindowExW(ex, w!("RUSTuTTYLog"), PCWSTR(title.as_ptr()), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, CW_USEDEFAULT, self.px(640), self.px(420), Some(self.main), None, Some(instance), None) else {
+                return;
+            };
+            deck_ui::style_window(h);
+            let child = |class: PCWSTR, text: PCWSTR, style: WINDOW_STYLE, ex: WINDOW_EX_STYLE, id: usize| {
+                let c = CreateWindowExW(ex, class, text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | style, 0, 0, 0, 0, Some(h), Some(HMENU(id as *mut _)), Some(instance), None).unwrap_or_default();
+                SendMessageW(c, WM_SETFONT, Some(WPARAM(self.gui_font.0 as usize)), Some(LPARAM(1)));
+                deck_ui::style_control(c);
+            };
+            let text_style = WS_VSCROLL | WS_HSCROLL | WINDOW_STYLE((ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL) as u32);
+            child(w!("EDIT"), w!(""), text_style, WS_EX_CLIENTEDGE, LOG_TEXT);
+            child(w!("BUTTON"), w!("&Copy all"), WINDOW_STYLE(BS_PUSHBUTTON as u32), WINDOW_EX_STYLE(0), LOG_COPY);
+            child(w!("BUTTON"), w!("Close"), WINDOW_STYLE(BS_PUSHBUTTON as u32), WINDOW_EX_STYLE(0), LOG_CLOSE);
+            self.event_log = Some((h, id));
+            layout_event_log(h);
+            self.refresh_event_log();
+            let _ = ShowWindow(h, if cfg!(feature = "test-hooks") { SW_SHOWNOACTIVATE } else { SW_SHOW });
+        }
+    }
+
+    /// Puts the log's lines in the Event Log window, scrolled to the newest.
+    fn refresh_event_log(&self) {
+        let Some((h, id)) = self.event_log else { return };
+        let Some(s) = self.sessions.iter().find(|s| s.id == id) else { return };
+        let text = if s.log.is_empty() { "Nothing logged yet.".to_string() } else { s.log.join("\r\n") };
+        unsafe {
+            let Ok(edit) = GetDlgItem(Some(h), LOG_TEXT as i32) else { return };
+            let _ = SetWindowTextW(edit, PCWSTR(wide(&text).as_ptr()));
+            let end = text.encode_utf16().count();
+            SendMessageW(edit, EM_SETSEL, Some(WPARAM(end)), Some(LPARAM(end as isize)));
+            SendMessageW(edit, EM_SCROLLCARET, None, None);
+        }
+    }
+
     /// Puts an input method's composition at the cursor, in the terminal's font.
     fn place_ime(&self) {
         unsafe {
@@ -2094,6 +2268,7 @@ impl Deck {
             out += &format!("label{i}={}\n", s.label());
         }
         out += &format!("clip={:?}\n", clipboard::get().unwrap_or_default());
+        out += &format!("eventlog={}\n", self.event_log.is_some());
         if let Some(s) = self.current() {
             out += &format!("selection={}\nalt={}\n", s.term.has_selection(), s.term.alt_screen());
             for r in 0..s.term.size().1 {
@@ -2111,6 +2286,12 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     let Some(d) = deck() else { return DefWindowProcW(hwnd, msg, wp, lp) };
     match msg {
         WM_SIZE => d.layout(),
+        // only a drag of the frame, not of the title bar, brings up the tip
+        WM_SIZING => {
+            d.sizing_starts();
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        WM_EXITSIZEMOVE => d.sizing_ends(),
         WM_SETFOCUS => {
             take_focus(d.content);
         }
@@ -2414,6 +2595,14 @@ fn main() {
             lpszClassName: w!("RUSTuTTYContent"),
             ..Default::default()
         });
+        RegisterClassW(&WNDCLASSW {
+            lpfnWndProc: Some(event_log_proc),
+            hInstance: instance,
+            hIcon: LoadIconW(Some(instance), PCWSTR(1 as *const u16)).unwrap_or_default(),
+            hCursor: arrow,
+            lpszClassName: w!("RUSTuTTYLog"),
+            ..Default::default()
+        });
         // Test windows open off-screen, so they don't flash up over someone's work.
         let x = if cfg!(feature = "test-hooks") { -4000 } else { CW_USEDEFAULT };
         let ex = if cfg!(feature = "test-hooks") { WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW } else { WINDOW_EX_STYLE(0) };
@@ -2449,7 +2638,7 @@ fn main() {
             cell: (8, 16), dpi: GetDpiForWindow(main).max(96), font_in_use: (String::new(), 0),
             sessions: Vec::new(), active: None, next_id: 1, saved,
             inbox: Default::default(), rt, store,
-            skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), clicks: (std::time::Instant::now(), 0, LPARAM(0)), wheel: 0, hwheel: 0, last_move: None, key_repeat: false, caret: (0, 0), composing: false, focused: false,
+            skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), clicks: (std::time::Instant::now(), 0, LPARAM(0)), wheel: 0, hwheel: 0, last_move: None, key_repeat: false, caret: (0, 0), composing: false, event_log: None, size_tip: None, focused: false,
             started: std::time::Instant::now(), cursor_off: false, flash: false, pointer_hidden: false, compose_state: 0, compose_first: 0, full_screen: None, close_held: None, system_items: 0,
         }));
         DECK.store(d, Ordering::Release);

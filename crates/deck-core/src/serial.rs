@@ -25,6 +25,7 @@ pub(crate) async fn run(target: &Target, mut io: Io) -> anyhow::Result<String> {
         2 => FlowControl::Hardware,
         _ => FlowControl::Software,
     };
+    io.log(format!("Opening serial device {}", target.host));
     let mut port = tokio_serial::new(target.host.as_str(), s.i("SerialSpeed", 9600))
         .parity(parity)
         .data_bits(data)
@@ -32,6 +33,7 @@ pub(crate) async fn run(target: &Target, mut io: Io) -> anyhow::Result<String> {
         .flow_control(flow)
         .open_native_async()
         .map_err(|e| anyhow::anyhow!("Could not open {}: {e}", target.host))?;
+    io.log(format!("Opened serial device {} at {} baud", target.host, s.i("SerialSpeed", 9600)));
     io.logged_in();
     let mut buf = [0u8; 8192];
     loop {

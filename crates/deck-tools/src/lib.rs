@@ -32,6 +32,8 @@ pub struct Args {
     /// turn off agent forwarding a session has saved.
     pub agent: Option<bool>,
     pub batch: bool,
+    /// `-v`: show the Event Log as the session goes.
+    pub verbose: bool,
     pub rest: Vec<String>,
 }
 
@@ -100,6 +102,7 @@ impl Args {
                 "-A" => out.agent = Some(true),
                 "-a" => out.agent = Some(false),
                 "-batch" => out.batch = true,
+                "-v" => out.verbose = true,
                 "-pw" => anyhow::bail!("-pw isn't supported: a password on a command line can be read by other programs"),
                 _ => out.rest.push(a),
             }
@@ -155,6 +158,9 @@ impl Args {
         }
         if self.batch {
             t.settings.set(BATCH, Value::Int(1));
+        }
+        if self.verbose {
+            t.settings.set(session::VERBOSE, Value::Int(1));
         }
     }
 }
@@ -296,6 +302,7 @@ pub async fn run_console(target: Target) -> anyhow::Result<String> {
     });
     let keep = target.settings.b("SshNoShell", false);
     let plain = target.settings.b("NoPTY", false) && output_is_console();
+    let verbose = target.settings.b(session::VERBOSE, false);
     let raw = RawConsole::new();
     let tx = session::spawn(&tokio::runtime::Handle::current(), target, host_keys(), console_size(), sink);
     pump_stdin(tx.clone(), keep);
@@ -311,6 +318,12 @@ pub async fn run_console(target: Target) -> anyhow::Result<String> {
                 let mut err = std::io::stderr();
                 err.write_all(&b)?;
                 err.flush()?;
+            }
+            // -v: the Event Log on standard error, as Plink's
+            Some(Event::Log(line)) => {
+                if verbose {
+                    eprintln!("{line}");
+                }
             }
             Some(Event::Closed(why, _)) => break why,
             None => break "The session ended.".to_string(),

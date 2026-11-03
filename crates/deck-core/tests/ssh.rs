@@ -22,6 +22,7 @@ struct Client {
     rx: UnboundedReceiver<Event>,
     output: String,
     closed: Option<String>,
+    log: Vec<String>,
 }
 
 impl Client {
@@ -37,13 +38,14 @@ impl Client {
             let _ = etx.send(e);
         });
         let tx = spawn(&tokio::runtime::Handle::current(), target, store, (80, 24), sink);
-        Client { tx, rx, output: String::new(), closed: None }
+        Client { tx, rx, output: String::new(), closed: None, log: Vec::new() }
     }
 
     async fn pump(&mut self) -> bool {
         match self.rx.recv().await {
             Some(Event::Output(b) | Event::Local(b)) => self.output.push_str(&String::from_utf8_lossy(&b)),
             Some(Event::Closed(why, _)) => self.closed = Some(why),
+            Some(Event::Log(line)) => self.log.push(line),
             None => return false,
         }
         true
@@ -81,6 +83,20 @@ impl Client {
         self.send(&format!("{PASSWORD}\r"));
         self.expect("welcome").await;
     }
+}
+
+/// The Event Log hears what PuTTY's does: the connection, the host key, the
+/// login and the channel, and none of what's typed.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_event_log_follows_the_connection() {
+    let (port, _seen) = server::start(new_key(Algorithm::Ed25519), vec![MethodKind::Password]).await;
+    let mut c = Client::open(port, Some(USER), Arc::new(MemoryStore::default()));
+    c.login().await;
+    let log = c.log.join("\n");
+    for want in [format!("Connecting to 127.0.0.1 port {port}"), "Host key fingerprint is: ssh-ed25519".into(), "Host key accepted".into(), "Access granted".into(), "Opened main channel".into(), "Allocated pty".into(), "Started a shell".into()] {
+        assert!(log.contains(&want), "{want:?} not in:\n{log}");
+    }
+    assert!(!log.contains(PASSWORD), "no password in the log");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -133,6 +149,18 @@ async fn declining_a_new_key_sends_nothing() {
     c.closed().await;
     assert!(seen.lock().unwrap().passwords.is_empty());
     assert!(store.deck.lock().unwrap().is_empty());
+}
+
+/// Connect Once: the session goes ahead, and the key isn't kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_key_can_be_trusted_once() {
+    let (port, _seen) = server::start(new_key(Algorithm::Ed25519), vec![MethodKind::Password]).await;
+    let store = Arc::new(MemoryStore::default());
+    let mut c = Client::open(port, Some(USER), store.clone());
+    c.expect("Trust this host").await;
+    c.send("o\r");
+    c.expect("assword").await;
+    assert!(store.deck.lock().unwrap().is_empty(), "the key wasn't remembered");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -472,8 +472,22 @@ pub(crate) async fn connect(target: &Target, store: &Arc<dyn HostKeyStore>, io: 
         || (is_local(&target.host) && !s.b("ProxyLocalhost", false))
         || excluded(&s.s("ProxyExcludeList", ""), &target.host);
     if skip {
-        return Ok(Box::new(tcp(&target.host, target.port, s).await?));
+        io.lock().await.log(format!("Connecting to {} port {}", target.host, target.port));
+        let c = tcp(&target.host, target.port, s).await?;
+        if let Ok(peer) = c.peer_addr() {
+            io.lock().await.log(format!("Connected to {peer}"));
+        }
+        return Ok(Box::new(c));
     }
+    let kind = match method {
+        SOCKS4 => "SOCKS 4",
+        SOCKS5 => "SOCKS 5",
+        HTTP => "HTTP",
+        TELNET => "Telnet",
+        CMD => "local command",
+        _ => "SSH",
+    };
+    io.lock().await.log(format!("Connecting to {} port {} through a {kind} proxy", target.host, target.port));
     let user = s.s("ProxyUsername", "");
     let mut pass = Zeroizing::new(s.s("ProxyPassword", ""));
     if !user.is_empty() && pass.is_empty() && matches!(method, SOCKS5 | HTTP | TELNET) {

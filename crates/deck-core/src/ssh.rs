@@ -69,6 +69,7 @@ impl Client {
             return Ok(true);
         }
         let host = format!("{}:{}", self.host, self.port);
+        self.io.lock().await.log(format!("Host key fingerprint is: {} {print}", key.algorithm()));
         // a list of keys is the whole of what's trusted, as in PuTTY
         if !self.manual_keys.is_empty() && !self.is_manual(key, &print) {
             self.say(&format!("The host key for {host} isn't in this session's list of keys.\n{} {print}\n", key.algorithm()));
@@ -89,12 +90,14 @@ impl Client {
                 if hostkeys::known_any(self.store.as_ref(), &self.host, self.port) {
                     io.say("\x1b[1;31mA key of a different type is on record for this host, so this may be an attack.\x1b[0m\n");
                 }
-                let a = io.read_line("Trust this host and connect? (y/n) ", true).await;
-                let yes = a.is_some_and(|a| matches!(a.trim(), "y" | "Y" | "yes"));
-                if yes {
+                // PuTTY's three answers: Accept, Connect Once and Cancel
+                let a = io.read_line("Trust this host and connect? (y to remember the key, o to connect once, n to cancel) ", true).await;
+                let a = a.unwrap_or_default().trim().to_lowercase();
+                let remember = matches!(a.as_str(), "y" | "yes");
+                if remember {
                     self.remember(key);
                 }
-                yes
+                remember || matches!(a.as_str(), "o" | "once")
             }
             Verdict::Changed => {
                 let mut io = self.io.lock().await;
@@ -115,6 +118,7 @@ impl Client {
         if yes {
             self.accepted = Some(print);
         }
+        self.io.lock().await.log(if yes { "Host key accepted" } else { "Host key not accepted" });
         Ok(yes)
     }
 
@@ -621,7 +625,12 @@ async fn login(target: &Target, store: Arc<dyn HostKeyStore>, io: Arc<Mutex<Io>>
     let mut handle = client::connect_stream(config, stream, client).await.map_err(|e| {
         anyhow::anyhow!("SSH connection failed: {e}")
     })?;
-    if let Err(e) = authenticate(&mut handle, &io, target).await {
+    io.lock().await.log("Using SSH protocol version 2");
+    let result = authenticate(&mut handle, &io, target).await;
+    if result.is_ok() {
+        io.lock().await.log("Access granted");
+    }
+    if let Err(e) = result {
         // russh reports only "send error" once the connection has gone, and
         // keeps the real reason in the session task
         if handle.is_closed() {
@@ -891,6 +900,15 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
         io.say("Forwardings aren't set up on a shared connection.\n");
     }
     let no_forwards = Settings::default();
+    if !is_shared {
+        for f in s.forwards() {
+            io.log(match f {
+                Forward::Local { port, host, host_port, .. } => format!("Local port {port} forwarding to {host}:{host_port}"),
+                Forward::Remote { port, host, host_port, .. } => format!("Requesting remote port {port} forward to {host}:{host_port}"),
+                Forward::Dynamic { port, .. } => format!("Local port {port} SOCKS dynamic forwarding"),
+            });
+        }
+    }
     let forwards = start_forwards(&handle, if is_shared { &no_forwards } else { s }, |t| io.say(t)).await;
 
     // PuTTY's "Don't start a shell or command at all", for forwarding only
@@ -903,11 +921,13 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
     }
 
     let mut channel = handle.channel_open_session().await?;
+    io.log("Opened main channel");
     // the window may have been resized while the login prompts were up
     let (mut cols, mut rows) = (io.cols, io.rows);
     if !s.b("NoPTY", false) {
         let modes = algorithms::terminal_modes(s);
         channel.request_pty(false, &s.s("TerminalType", "xterm"), cols, rows, 0, 0, &modes).await?;
+        io.log("Allocated pty");
     }
     for (k, v) in s.map("Environment") {
         channel.set_env(false, k, v).await?;
@@ -923,8 +943,10 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
     let command = s.s("RemoteCommand", "");
     if command.is_empty() {
         channel.request_shell(false).await?;
+        io.log("Started a shell");
     } else {
         channel.exec(false, command).await?;
+        io.log("Started a command");
     }
 
     io.logged_in();
@@ -934,7 +956,10 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
             msg = channel.wait() => match msg {
                 Some(ChannelMsg::Data { data }) => (io.events)(Event::Output(data.to_vec())),
                 Some(ChannelMsg::ExtendedData { data, .. }) => (io.events)(Event::Output(data.to_vec())),
-                Some(ChannelMsg::ExitStatus { exit_status }) => status = Some(exit_status),
+                Some(ChannelMsg::ExitStatus { exit_status }) => {
+                    io.log(format!("Session sent command exit status {exit_status}"));
+                    status = Some(exit_status);
+                }
                 Some(ChannelMsg::Close) | None => break match status {
                     Some(0) | None => "Server closed the session.".to_string(),
                     Some(n) => format!("Session ended with exit status {n}."),

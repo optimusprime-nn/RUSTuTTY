@@ -15,6 +15,9 @@ use zeroize::Zeroize;
 /// Set by the console tools for `-batch`, on their own copy of the settings.
 pub const BATCH: &str = "DeckBatch";
 
+/// Set by the console tools for `-v`: the Event Log goes to standard error.
+pub const VERBOSE: &str = "DeckVerbose";
+
 pub enum Command {
     Input(Vec<u8>),
     /// The terminal answering the host, which is not the person typing.
@@ -90,6 +93,9 @@ pub enum Event {
     Output(Vec<u8>),
     /// Prompts and messages from this end, which stay out of session logs.
     Local(Vec<u8>),
+    /// A line for the Event Log, as PuTTY's logevent: what the connection is
+    /// doing, not what the host sends.
+    Log(String),
     /// The session is over. The reason is shown in its terminal. The flag is
     /// true when the far end ended it normally, not on an error, which is what
     /// `CloseOnExit` means by a clean exit.
@@ -125,6 +131,11 @@ impl Io {
     /// Called once login is over and typing belongs to the session.
     pub fn logged_in(&self) {
         self.line.ready.store(true, Ordering::Relaxed);
+    }
+
+    /// A line for the Event Log.
+    pub fn log(&self, text: impl Into<String>) {
+        (self.events)(Event::Log(text.into()));
     }
 
     pub fn say(&self, text: &str) {
@@ -286,12 +297,16 @@ fn console_io(target: &Target) -> Io {
             }
         }
     });
-    let events: EventSink = Arc::new(|e| {
-        if let Event::Output(b) | Event::Local(b) = e {
-            let mut out = std::io::stderr();
-            let _ = out.write_all(&b);
-            let _ = out.flush();
-        }
+    let verbose = target.settings.b(VERBOSE, false);
+    let events: EventSink = Arc::new(move |e| {
+        let text = match e {
+            Event::Output(b) | Event::Local(b) => b,
+            Event::Log(line) if verbose => format!("{line}\n").into_bytes(),
+            _ => return,
+        };
+        let mut out = std::io::stderr();
+        let _ = out.write_all(&text);
+        let _ = out.flush();
     });
     Io { commands, events, cols: 80, rows: 24, line: Default::default(), batch: target.settings.b(BATCH, false) }
 }

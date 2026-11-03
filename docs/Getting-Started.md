@@ -8,7 +8,9 @@ window, and the session appears under **Open sessions**.
 
 The login happens in the terminal, as in PuTTY: if the server asks for a
 password, type it there. The first time you reach a server, RUSTuTTY shows its
-host key fingerprint and asks whether to trust it, exactly as PuTTY does.
+host key fingerprint and asks whether to trust it, as PuTTY does: type `y` to
+connect and remember the key, `o` to connect this once without remembering it,
+or `n` to cancel.
 
 The box takes more than SSH:
 
