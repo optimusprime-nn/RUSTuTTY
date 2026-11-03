@@ -757,6 +757,31 @@ async fn alt_and_a_character() {
     peer.wait(0, "\x1b\u{1F600}".as_bytes()).await;
 }
 
+/// A program that asks for every move (1003) gets moves with no button held,
+/// once per cell, and the sideways wheel.
+#[tokio::test(flavor = "multi_thread")]
+async fn moves_and_the_sideways_wheel_are_reported() {
+    let peer = Peer::start().await;
+    let app = App::start(&raw_args(peer.port));
+    peer.connected(1).await;
+    peer.send(0, b"x\x1b[?1003h\x1b[?1006h");
+    app.sees("row=x").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let cell = app.cell();
+    let at = |c: i32, r: i32| ((r * cell.1 + cell.1 / 2) << 16 | (c * cell.0 + cell.0 / 2)) as isize;
+    app.post(app.content, WM_MOUSEMOVE, 0, at(2, 1));
+    app.post(app.content, WM_MOUSEMOVE, 0, at(2, 1));
+    app.post(app.content, WM_MOUSEMOVE, 0, at(4, 1));
+    peer.wait(0, b"\x1b[<35;5;2M").await;
+    let got = String::from_utf8_lossy(&peer.received(0)).to_string();
+    assert_eq!(got.matches("\x1b[<35;3;2M").count(), 1, "one report per cell: {got:?}");
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(app.content, &mut r).unwrap() };
+    let screen = ((r.top + 20) as isize) << 16 | (r.left + 20) as isize & 0xffff;
+    app.post(app.content, WM_MOUSEHWHEEL, 120usize << 16, screen);
+    peer.wait(0, b"\x1b[<67;").await;
+}
+
 /// Small wheel movements, as a touchpad sends, add up to one step.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_wheel_adds_up_small_movements() {

@@ -87,6 +87,8 @@ pub enum Action {
     ReportTitle,
     Print(Vec<u8>),
     PrintEnd,
+    /// Mode 1015 on or off: mouse reports in urxvt's decimal form.
+    UrxvtMouse(bool),
 }
 
 /// The end of a print job, which is looked for in everything that's printed.
@@ -199,6 +201,12 @@ impl Filter {
         let c = &self.config;
         // `03` and `3;1` mean the same as `3` to the emulator
         let first = std::str::from_utf8(params).ok().and_then(|p| p.split(';').next()?.parse::<u32>().ok());
+        // urxvt's mouse encoding, which the terminal library doesn't know
+        if let ([b'?', rest @ ..], b'h' | b'l') = (params, last) {
+            if rest.split(|&b| b == b';').any(|m| m == b"1015") {
+                actions.push(Action::UrxvtMouse(last == b'h'));
+            }
+        }
         match (params, last) {
             (b"5" | b"?5", b'i') if c.printer => Some(Vec::new()),
             (b"?4", b'i') => Some(Vec::new()),

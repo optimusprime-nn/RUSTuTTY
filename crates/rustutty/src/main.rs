@@ -174,6 +174,10 @@ struct Deck {
     clicks: (std::time::Instant, u32, LPARAM),
     /// Wheel movement not yet acted on: one step is 120, and touchpads send less.
     wheel: i32,
+    /// The same for the sideways wheel.
+    hwheel: i32,
+    /// The cell a move with no button was last reported in.
+    last_move: Option<(usize, usize)>,
     /// The key being handled is held down and repeating.
     key_repeat: bool,
     /// Where the cursor was last drawn, for an input method's window.
@@ -1525,7 +1529,7 @@ impl Deck {
             return false;
         }
         let Some(s) = self.current() else { return false };
-        match s.term.mouse_report(button, cell.0, cell.1, pressed, motion) {
+        match s.term.mouse_report(button, cell.0, cell.1, pressed, motion, (shift_down(), ctrl_down())) {
             Some(bytes) => {
                 s.send(bytes);
                 true
@@ -1552,10 +1556,26 @@ impl Deck {
         self.report(button, self.cell_at(lp), true, true)
     }
 
+    /// A move with no button held, for a program that asked for every move
+    /// (mode 1003). Sent once per cell, as PuTTY does.
+    fn report_move(&mut self, lp: LPARAM) -> bool {
+        let cell = self.cell_at(lp);
+        if self.last_move == Some(cell) {
+            return self.current().is_some_and(|s| s.term.wants_mouse());
+        }
+        let sent = self.report(3, cell, true, true);
+        if sent {
+            self.last_move = Some(cell);
+        }
+        sent
+    }
+
     /// Adds up wheel movement and acts once per whole step, as PuTTY does, so a
     /// touchpad's many small movements don't each scroll or each send a report.
-    fn on_wheel(&mut self, wp: WPARAM, lp: LPARAM) {
-        self.wheel += ((wp.0 >> 16) & 0xffff) as i16 as i32;
+    /// The sideways wheel only ever goes to a program that has the mouse.
+    fn on_wheel(&mut self, wp: WPARAM, lp: LPARAM, sideways: bool) {
+        let wheel = if sideways { &mut self.hwheel } else { &mut self.wheel };
+        *wheel += ((wp.0 >> 16) & 0xffff) as i16 as i32;
         // the wheel's position is in screen coordinates
         let mut p = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
         unsafe {
@@ -1563,10 +1583,21 @@ impl Deck {
         }
         let b = self.border();
         let cell = (((p.x - b) / self.cell.0).max(0) as usize, ((p.y - b) / self.cell.1).max(0) as usize);
-        while self.wheel.abs() >= WHEEL_DELTA as i32 {
-            let up = self.wheel > 0;
-            self.wheel -= if up { WHEEL_DELTA as i32 } else { -(WHEEL_DELTA as i32) };
-            if !self.report(if up { 64 } else { 65 }, cell, true, false) {
+        loop {
+            let wheel = if sideways { &mut self.hwheel } else { &mut self.wheel };
+            if wheel.abs() < WHEEL_DELTA as i32 {
+                break;
+            }
+            // up, or for the sideways wheel right, is positive
+            let up = *wheel > 0;
+            *wheel -= if up { WHEEL_DELTA as i32 } else { -(WHEEL_DELTA as i32) };
+            let button = match (sideways, up) {
+                (false, true) => 64,
+                (false, false) => 65,
+                (true, false) => 66,
+                (true, true) => 67,
+            };
+            if !self.report(button, cell, true, false) && !sideways {
                 if let Some(s) = self.current() {
                     s.term.scroll(if up { SCROLL_STEP } else { -SCROLL_STEP });
                 }
@@ -2124,7 +2155,18 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let _ = ReleaseCapture();
         }
         WM_MOUSEMOVE if !d.selecting && wp.0 & 0x13 != 0 && d.report_drag(wp, lp) => {}
-        WM_MOUSEWHEEL => d.on_wheel(wp, lp),
+        WM_MOUSEMOVE if !d.selecting && wp.0 & 0x13 == 0 && !d.pointer_hidden && d.report_move(lp) => {}
+        WM_MOUSEWHEEL => d.on_wheel(wp, lp, false),
+        WM_MOUSEHWHEEL => d.on_wheel(wp, lp, true),
+        // an arrow while a program has the mouse, as PuTTY, and the I-beam
+        // for selecting text otherwise
+        WM_SETCURSOR if (lp.0 & 0xffff) as u32 == HTCLIENT => {
+            let shape = if d.current().is_some_and(|s| s.term.wants_mouse()) { IDC_ARROW } else { IDC_IBEAM };
+            if !d.pointer_hidden {
+                SetCursor(LoadCursorW(None, shape).ok());
+            }
+            return LRESULT(1);
+        }
         // a second click selects a word and a third the line, and dragging then
         // goes by words or lines
         WM_LBUTTONDOWN => {
@@ -2291,7 +2333,7 @@ fn main() {
             cell: (8, 16), dpi: GetDpiForWindow(main).max(96), font_in_use: (String::new(), 0),
             sessions: Vec::new(), active: None, next_id: 1, saved,
             inbox: Default::default(), rt, store,
-            skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), clicks: (std::time::Instant::now(), 0, LPARAM(0)), wheel: 0, key_repeat: false, caret: (0, 0), composing: false, focused: false,
+            skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), clicks: (std::time::Instant::now(), 0, LPARAM(0)), wheel: 0, hwheel: 0, last_move: None, key_repeat: false, caret: (0, 0), composing: false, focused: false,
             started: std::time::Instant::now(), cursor_off: false, flash: false, pointer_hidden: false, compose_state: 0, compose_first: 0, full_screen: None, close_held: None, system_items: 0,
         }));
         DECK.store(d, Ordering::Release);

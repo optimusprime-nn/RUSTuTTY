@@ -199,6 +199,8 @@ pub struct Terminal {
     /// `NoRemoteWinTitle` off: the host may set the title, and a title query
     /// then reports its title rather than the session's own.
     remote_title: bool,
+    /// Mode 1015: mouse reports in urxvt's form.
+    urxvt_mouse: bool,
     filter: Filter,
     decoder: Option<Decoder>,
     encoder: Option<Encoder>,
@@ -306,6 +308,7 @@ impl Terminal {
             encoder: (encoding != UTF_8).then(|| encoding.new_encoder()),
             title: s.s("WinTitle", ""),
             remote_title: !s.b("NoRemoteWinTitle", false),
+            urxvt_mouse: false,
             scroll_on_output: s.b("ScrollOnDisp", true),
             scroll_on_key: s.b("ScrollOnKey", false),
             paste_controls: s.b("PasteControls", false),
@@ -354,6 +357,7 @@ impl Terminal {
     /// Reset Terminal from the menu: back to how the session started, with its
     /// own starting modes, not the terminal library's.
     pub fn reset(&mut self) {
+        self.urxvt_mouse = false;
         self.parser.advance(&mut self.term, b"\x1bc");
         self.parser.advance(&mut self.term, &self.start);
     }
@@ -409,6 +413,10 @@ impl Terminal {
                 }
                 Action::PrintEnd => {
                     self.events.0.lock().unwrap().push(TermEvent::PrintEnd);
+                    continue;
+                }
+                Action::UrxvtMouse(on) => {
+                    self.urxvt_mouse = on;
                     continue;
                 }
             };
@@ -480,31 +488,43 @@ impl Terminal {
         &mut self.palette
     }
 
-    /// What a mouse event should be sent as, if the program asked for them.
-    /// `button` is 0 left, 1 middle, 2 right, 64 wheel up, 65 wheel down.
-    pub fn mouse_report(&self, button: u8, col: usize, row: usize, pressed: bool, motion: bool) -> Option<Vec<u8>> {
+    /// Whether a program has the mouse, so clicks go to it, not to selecting.
+    pub fn wants_mouse(&self) -> bool {
+        self.mouse_reports && self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// What a mouse event should be sent as, if the program asked for them,
+    /// as PuTTY's `term_mouse`. `button` is 0 left, 1 middle, 2 right, 3 none
+    /// (a move with no button held), 64 to 67 the wheel up, down, left and
+    /// right. `mods` is Shift and Ctrl.
+    pub fn mouse_report(&self, button: u8, col: usize, row: usize, pressed: bool, motion: bool, mods: (bool, bool)) -> Option<Vec<u8>> {
         let mode = *self.term.mode();
         if !self.mouse_reports {
             return None;
         }
-        let wanted = if motion {
-            mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
-        } else {
-            mode.intersects(TermMode::MOUSE_MODE)
+        let wanted = match (motion, button) {
+            // mode 1003 reports moves with no button held
+            (true, 3) => mode.contains(TermMode::MOUSE_MOTION),
+            (true, _) => mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION),
+            (false, _) => mode.intersects(TermMode::MOUSE_MODE),
         };
         if !wanted {
             return None;
         }
-        let code = button + if motion { 32 } else { 0 };
+        let sgr = mode.contains(TermMode::SGR_MOUSE);
+        // only 1006 can say which button was let go
+        let code = if pressed || sgr { button } else { 3 };
+        let code = code + if motion { 32 } else { 0 } + if mods.0 { 4 } else { 0 } + if mods.1 { 16 } else { 0 };
         let (x, y) = (col + 1, row + 1);
-        if mode.contains(TermMode::SGR_MOUSE) {
+        if sgr {
             let end = if pressed { 'M' } else { 'm' };
             return Some(format!("\x1b[<{code};{x};{y}{end}").into_bytes());
         }
-        // the old form has no release of a particular button, and tops out at 223
-        let code = if pressed { code } else { 3 };
-        let small = |v: usize| (v.min(223) + 32) as u8;
-        Some(vec![0x1b, b'[', b'M', code + 32, small(x), small(y)])
+        if self.urxvt_mouse {
+            return Some(format!("\x1b[{};{x};{y}M", code + 32).into_bytes());
+        }
+        // the old form can't say a place past 223, so says nothing, as PuTTY
+        (x <= 223 && y <= 223).then(|| vec![0x1b, b'[', b'M', code + 32, (x + 32) as u8, (y + 32) as u8])
     }
 
     pub fn alt_screen(&self) -> bool {
@@ -993,12 +1013,28 @@ mod tests {
     #[test]
     fn mouse_is_only_reported_when_asked_for() {
         let mut t = Terminal::new(40, 10);
-        assert_eq!(t.mouse_report(0, 1, 2, true, false), None);
+        const NO: (bool, bool) = (false, false);
+        assert_eq!(t.mouse_report(0, 1, 2, true, false, NO), None);
         t.feed(b"\x1b[?1000h");
-        assert_eq!(t.mouse_report(0, 1, 2, true, false).unwrap(), vec![0x1b, b'[', b'M', 32, 34, 35]);
-        assert_eq!(t.mouse_report(0, 1, 2, true, true), None, "plain clicks mode has no motion");
+        assert_eq!(t.mouse_report(0, 1, 2, true, false, NO).unwrap(), vec![0x1b, b'[', b'M', 32, 34, 35]);
+        assert_eq!(t.mouse_report(0, 1, 2, true, true, NO), None, "plain clicks mode has no motion");
         t.feed(b"\x1b[?1006h");
-        assert_eq!(t.mouse_report(0, 1, 2, false, false).unwrap(), b"\x1b[<0;2;3m");
+        assert_eq!(t.mouse_report(0, 1, 2, false, false, NO).unwrap(), b"\x1b[<0;2;3m");
+    }
+
+    #[test]
+    fn mouse_reports_carry_modifiers_moves_and_urxvt_form() {
+        let mut t = Terminal::new(300, 10);
+        t.feed(b"\x1b[?1000h");
+        assert_eq!(t.mouse_report(0, 1, 2, true, false, (true, true)).unwrap(), vec![0x1b, b'[', b'M', 32 + 20, 34, 35], "Shift is 4 and Ctrl 16");
+        assert_eq!(t.mouse_report(0, 250, 2, true, false, (false, false)), None, "the old form can't reach column 251");
+        assert_eq!(t.mouse_report(3, 1, 2, true, true, (false, false)), None, "a move with no button needs 1003");
+        t.feed(b"\x1b[?1003h");
+        assert_eq!(t.mouse_report(3, 1, 2, true, true, (false, false)).unwrap(), vec![0x1b, b'[', b'M', 32 + 35, 34, 35]);
+        t.feed(b"\x1b[?1015h");
+        assert_eq!(t.mouse_report(66, 250, 2, true, false, (false, false)).unwrap(), b"\x1b[98;251;3M", "urxvt's form, any column");
+        t.feed(b"\x1b[?1015l");
+        assert_eq!(t.mouse_report(0, 1, 2, true, false, (false, false)).unwrap(), vec![0x1b, b'[', b'M', 32, 34, 35]);
     }
 
     fn with(pairs: &[(&str, Value)]) -> Terminal {
