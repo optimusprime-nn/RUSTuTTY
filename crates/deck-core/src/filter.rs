@@ -132,6 +132,11 @@ impl Filter {
         Filter { config, state: State::Ground, printing: None }
     }
 
+    /// New settings, keeping the place in any sequence half read.
+    pub fn set_config(&mut self, config: FilterConfig) {
+        self.config = config;
+    }
+
     fn sgr(&self, params: &[u8]) -> Option<Vec<u8>> {
         let c = &self.config;
         if c.ansi_colour && c.xterm256 && c.true_colour {

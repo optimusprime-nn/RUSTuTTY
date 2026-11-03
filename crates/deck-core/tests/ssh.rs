@@ -861,3 +861,35 @@ async fn a_host_closing_is_clean_and_an_error_is_not() {
     let (why, clean) = ended(port).await;
     assert!(!clean, "a refused connection isn't clean: {why}");
 }
+
+/// Change Settings turns on a log for a session that's already running.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_session_starts_logging_when_told() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (go_tx, mut go_rx) = unbounded_channel::<()>();
+    tokio::spawn(async move {
+        let (mut c, _) = listener.accept().await.unwrap();
+        c.write_all(b"before\r\n").await.unwrap();
+        go_rx.recv().await;
+        c.write_all(b"after\r\n").await.unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let target = Target::new(Protocol::Raw, "127.0.0.1", port);
+    let mut c = Client::open_target(target.clone(), Arc::new(MemoryStore::default()));
+    c.expect("before").await;
+    let dir = std::env::temp_dir().join(format!("rustutty-log-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("session.log");
+    let mut new = target;
+    new.settings.set("LogType", Value::Int(1));
+    new.settings.set("LogFileName", Value::Str(file.to_string_lossy().into_owned()));
+    new.settings.set("LogHeader", Value::Int(0));
+    c.tx.send(Command::Reconfigure(Box::new(new))).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    go_tx.send(()).unwrap();
+    c.expect("after").await;
+    let logged = std::fs::read_to_string(&file).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(logged.contains("after") && !logged.contains("before"), "only output after the change is logged: {logged:?}");
+}

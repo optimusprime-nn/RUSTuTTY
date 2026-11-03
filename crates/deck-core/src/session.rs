@@ -21,6 +21,9 @@ pub enum Command {
     Reply(Vec<u8>),
     Resize { cols: u32, rows: u32 },
     Special(Special),
+    /// Change Settings on a running session. Local echo, line editing and the
+    /// log follow the new settings; the connection itself is left as it is.
+    Reconfigure(Box<Target>),
     Close,
 }
 
@@ -144,7 +147,7 @@ impl Io {
                     self.cols = cols;
                     self.rows = rows;
                 }
-                Command::Reply(_) | Command::Special(_) => {}
+                Command::Reply(_) | Command::Special(_) | Command::Reconfigure(_) => {}
                 Command::Input(mut bytes) => {
                     pending.extend_from_slice(&bytes);
                     bytes.zeroize();
@@ -206,24 +209,34 @@ impl Io {
     }
 }
 
-/// Adds the session's log, if it has one, to the event sink.
-fn logged(target: &Target, events: EventSink) -> (EventSink, Option<String>) {
-    match Log::open(target) {
-        Ok(None) => (events, None),
-        Err(e) => (events, Some(e.to_string())),
-        Ok(Some(log)) => {
-            let log = StdMutex::new(log);
-            let sink: EventSink = Arc::new(move |e: Event| {
-                if let Event::Output(bytes) = &e {
-                    if let Ok(mut log) = log.lock() {
-                        log.write(bytes);
-                    }
+type LogSlot = Arc<StdMutex<Option<Log>>>;
+
+/// Adds the session's log to the event sink. The log can be swapped for
+/// another when the settings change, through the slot returned.
+fn logged(target: &Target, events: EventSink) -> (EventSink, Option<String>, LogSlot) {
+    let (log, error) = match Log::open(target) {
+        Ok(log) => (log, None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    let slot: LogSlot = Arc::new(StdMutex::new(log));
+    let log = slot.clone();
+    let sink: EventSink = Arc::new(move |e: Event| {
+        if let Event::Output(bytes) = &e {
+            if let Ok(mut log) = log.lock() {
+                if let Some(log) = log.as_mut() {
+                    log.write(bytes);
                 }
-                events(e);
-            });
-            (sink, None)
+            }
         }
-    }
+        events(e);
+    });
+    (sink, error, slot)
+}
+
+/// The settings that decide which log is written and how.
+fn log_settings(t: &Target) -> (u32, String, u32, bool, bool) {
+    let s = &t.settings;
+    (s.i("LogType", 0), s.s("LogFileName", "putty.log"), s.i("LogFileClash", u32::MAX), s.b("LogFlush", true), s.b("LogHeader", true))
 }
 
 /// Reaches the host for the protocols that run over a plain stream.
@@ -305,13 +318,30 @@ pub fn spawn(
 ) -> UnboundedSender<Command> {
     let (tx, mut typed) = unbounded_channel();
     let (to_session, commands) = unbounded_channel();
-    let (events, log_error) = logged(&target, events);
+    let (events, log_error, log) = logged(&target, events);
     let line = Arc::new(LineState::default());
     let mut ldisc = Ldisc::new(&target.settings, &target.protocol);
     let (state, sink) = (line.clone(), events.clone());
+    let mut logging = log_settings(&target);
     runtime.spawn(async move {
         while let Some(cmd) = typed.recv().await {
             let cmd = match cmd {
+                // PuTTY's ldisc and log reconfig: a new log only if its settings changed
+                Command::Reconfigure(new) => {
+                    ldisc = Ldisc::new(&new.settings, &new.protocol);
+                    if log_settings(&new) != logging {
+                        logging = log_settings(&new);
+                        let opened = Log::open(&new);
+                        let failed = opened.as_ref().err().map(|e| e.to_string());
+                        if let Ok(mut slot) = log.lock() {
+                            *slot = opened.ok().flatten();
+                        }
+                        if let Some(why) = failed {
+                            sink(Event::Local(format!("\r\nCould not open the log file: {why}\r\n").into_bytes()));
+                        }
+                    }
+                    continue;
+                }
                 Command::Input(bytes) if state.ready.load(Ordering::Relaxed) => {
                     let (send, show) = ldisc.feed(&bytes, &state);
                     if !show.is_empty() {

@@ -249,7 +249,7 @@ pub(crate) async fn run(target: &Target, conn: Conn, telnet: bool, mut io: Io) -
                 // answers reach here as Input, once the session is ready
                 Some(Command::Reply(_)) => {}
                 Some(Command::Special(crate::session::Special::Telnet(code))) if telnet => wr.write_all(&[255, code]).await?,
-                Some(Command::Special(_)) => {}
+                Some(Command::Special(_) | Command::Reconfigure(_)) => {}
                 Some(Command::Input(b)) => {
                     let b = if telnet { encode_input(&b, keyboard, newline) } else { b };
                     wr.write_all(&b).await?;

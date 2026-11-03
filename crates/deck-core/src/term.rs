@@ -113,12 +113,20 @@ fn cube_or_grey(i: u8) -> Rgb {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderCell {
     pub c: char,
+    /// Combining characters drawn over `c`, such as accents, `'\0'` where
+    /// unused. PuTTY keeps them with the character before them too.
+    pub marks: [char; MARKS],
     pub fg: Rgb,
     pub bg: Rgb,
     pub bold: bool,
     pub underline: bool,
+    pub strike: bool,
     pub wide: bool,
 }
+
+/// The most combining characters drawn on one cell. More are rare, and stay
+/// in the text for copying.
+pub const MARKS: usize = 3;
 
 pub struct Screen {
     pub rows: Vec<Vec<RenderCell>>,
@@ -250,16 +258,45 @@ impl Terminal {
         Terminal::with_settings(cols, rows, &Settings::default())
     }
 
-    pub fn with_settings(cols: usize, rows: usize, s: &Settings) -> Terminal {
-        let events = Listener::default();
-        let config = Config {
+    /// The terminal library's settings from the session's.
+    fn config(s: &Settings) -> Config {
+        Config {
             scrolling_history: scrollback_lines(s),
             // A remote host must not be able to touch the clipboard.
             osc52: Osc52::Disabled,
+            default_cursor_style: cursor_style(s),
             ..Config::default()
-        };
-        let config = Config { default_cursor_style: cursor_style(s), ..config };
-        let term = Term::new(config, &TermSize::new(cols.max(1), rows.max(1)), events.clone());
+        }
+    }
+
+    /// Change Settings on a running session, as PuTTY's `term_reconfig`: the
+    /// new settings take over, and the screen, scrollback and modes the host
+    /// has set stay.
+    pub fn reconfigure(&mut self, s: &Settings) {
+        self.term.set_options(Terminal::config(s));
+        self.filter.set_config(FilterConfig::new(s));
+        let encoding = line_encoding(&s.s("LineCodePage", ""));
+        let now = self.encoder.as_ref().map_or(UTF_8, |e| e.encoding());
+        if encoding != now {
+            self.decoder = (encoding != UTF_8).then(|| encoding.new_decoder_without_bom_handling());
+            self.encoder = (encoding != UTF_8).then(|| encoding.new_encoder());
+        }
+        self.remote_title = !s.b("NoRemoteWinTitle", false);
+        if !self.remote_title {
+            self.title = s.s("WinTitle", "");
+        }
+        self.scroll_on_output = s.b("ScrollOnDisp", true);
+        self.scroll_on_key = s.b("ScrollOnKey", false);
+        self.paste_controls = s.b("PasteControls", false);
+        self.rect_select = s.b("RectSelect", false);
+        self.palette = Palette::from_settings(s);
+        self.mouse_reports = !s.b("NoMouseReporting", false);
+        self.bracketed_paste = !s.b("DisableBracketedPaste", false);
+    }
+
+    pub fn with_settings(cols: usize, rows: usize, s: &Settings) -> Terminal {
+        let events = Listener::default();
+        let term = Term::new(Terminal::config(s), &TermSize::new(cols.max(1), rows.max(1)), events.clone());
         let encoding = line_encoding(&s.s("LineCodePage", ""));
         let mut t = Terminal {
             term,
@@ -620,7 +657,7 @@ impl Terminal {
         let content = self.term.renderable_content();
         let (cols, lines) = self.size();
         let p = &self.palette;
-        let blank = RenderCell { c: ' ', fg: p.fg, bg: p.bg, bold: false, underline: false, wide: false };
+        let blank = RenderCell { c: ' ', marks: ['\0'; MARKS], fg: p.fg, bg: p.bg, bold: false, underline: false, strike: false, wide: false };
         let mut rows = vec![vec![blank; cols]; lines];
         let offset = content.display_offset as i32;
         let selection = content.selection;
@@ -644,12 +681,18 @@ impl Terminal {
             }
             let row = item.point.line.0 + offset;
             if (0..lines as i32).contains(&row) {
+                let mut marks = ['\0'; MARKS];
+                for (slot, &m) in marks.iter_mut().zip(cell.zerowidth().unwrap_or(&[])) {
+                    *slot = m;
+                }
                 rows[row as usize][item.point.column.0] = RenderCell {
                     c: cell.c,
+                    marks,
                     fg,
                     bg,
                     bold,
                     underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+                    strike: cell.flags.contains(Flags::STRIKEOUT),
                     wide: cell.flags.contains(Flags::WIDE_CHAR),
                 };
             }
@@ -701,6 +744,32 @@ mod tests {
         assert_ne!(t.screen().rows[0][5].bg, (0, 0, 0), "selection is highlighted");
         t.clear_selection();
         assert!(!t.has_selection());
+    }
+
+    #[test]
+    fn new_settings_reach_a_running_terminal() {
+        let mut t = Terminal::new(20, 3);
+        t.feed(&b"line\r\n".repeat(10));
+        let history = t.scroll_position().0;
+        assert!(!t.scroll_on_key());
+        let mut s = Settings::default();
+        s.set("ScrollOnKey", Value::Int(1));
+        s.set("Colour2", Value::Str("10,20,30".into()));
+        t.reconfigure(&s);
+        assert!(t.scroll_on_key(), "a terminal setting takes effect");
+        assert_eq!(t.screen().rows[2][0].bg, (10, 20, 30), "so does a colour");
+        assert_eq!(t.scroll_position().0, history, "the scrollback stays");
+        assert_eq!(t.row_text(0).trim(), "line", "and so does the screen");
+    }
+
+    #[test]
+    fn combining_marks_and_strikethrough_reach_the_screen() {
+        let mut t = Terminal::new(10, 2);
+        t.feed("e\u{301}x\x1b[9my".as_bytes());
+        let row = &t.screen().rows[0];
+        assert_eq!((row[0].c, row[0].marks[0]), ('e', '\u{301}'), "the accent stays with its letter");
+        assert_eq!((row[1].c, row[1].marks[0]), ('x', '\0'), "and takes no cell of its own");
+        assert!(row[2].strike && !row[1].strike);
     }
 
     #[test]

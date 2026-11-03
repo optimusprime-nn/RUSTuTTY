@@ -52,7 +52,7 @@ pub(crate) async fn run(target: &Target, mut io: Io) -> anyhow::Result<String> {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     port.clear_break()?;
                 }
-                Some(Command::Special(_)) => {}
+                Some(Command::Special(_) | Command::Reconfigure(_)) => {}
                 Some(Command::Input(b)) => port.write_all(&b).await?,
                 Some(Command::Resize { .. }) => {}
             },

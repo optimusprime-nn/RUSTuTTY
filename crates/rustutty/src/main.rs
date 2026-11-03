@@ -197,6 +197,17 @@ fn deck() -> Option<&'static mut Deck> {
     unsafe { DECK.load(Ordering::Acquire).as_mut() }
 }
 
+/// `UseSystemColours`: Windows' own text and background colours.
+fn system_colours(term: &mut Terminal, settings: &Settings) {
+    if settings.b("UseSystemColours", false) {
+        let colour = |i: SYS_COLOR_INDEX| {
+            let c = unsafe { GetSysColor(i) };
+            (c as u8, (c >> 8) as u8, (c >> 16) as u8)
+        };
+        term.palette_mut().use_system(colour(COLOR_WINDOWTEXT), colour(COLOR_WINDOW));
+    }
+}
+
 /// SetFocus can bring a window to the front, which a test build must never do.
 fn take_focus(hwnd: HWND) {
     if !cfg!(feature = "test-hooks") {
@@ -709,13 +720,7 @@ impl Deck {
         let (tc, tr) = (settings.i("TermWidth", cols), settings.i("TermHeight", rows));
         let (ic, ir) = if locked { (tc, tr) } else { (cols, rows) };
         let mut term = Terminal::with_settings(ic as usize, ir as usize, settings);
-        if settings.b("UseSystemColours", false) {
-            let colour = |i: SYS_COLOR_INDEX| {
-                let c = unsafe { GetSysColor(i) };
-                (c as u8, (c >> 8) as u8, (c >> 16) as u8)
-            };
-            term.palette_mut().use_system(colour(COLOR_WINDOWTEXT), colour(COLOR_WINDOW));
-        }
+        system_colours(&mut term, settings);
         let title = Some(settings.s("WinTitle", "")).filter(|t| !t.is_empty());
         let (keys, bells) = (KeyConfig::new(settings), BellLimit::new(settings));
         let first = self.sessions.is_empty();
@@ -896,7 +901,15 @@ impl Deck {
         let Some(new) = new else { return };
         let s = &mut self.sessions[i];
         (s.keys, s.bells) = (KeyConfig::new(&new), BellLimit::new(&new));
+        // as PuTTY's reconfig: the terminal, local echo, line editing and the
+        // log take the new settings now, not at the next session
+        s.term.reconfigure(&new);
+        system_colours(&mut s.term, &new);
+        if new.s("WinTitle", "") != s.target.settings.s("WinTitle", "") {
+            s.title = Some(new.s("WinTitle", "")).filter(|t| !t.is_empty());
+        }
         s.target.settings = new;
+        let _ = s.tx.send(Command::Reconfigure(Box::new(s.target.clone())));
         self.apply_window_settings();
         self.make_fonts();
         self.layout();
@@ -1753,7 +1766,7 @@ impl Deck {
                     let first = row[x];
                     let mut end = x;
                     let (mut text, mut dx) = (Vec::with_capacity(row.len()), Vec::with_capacity(row.len()));
-                    let style = |c: &deck_core::term::RenderCell| (c.fg, c.bg, c.bold, c.underline, c.wide);
+                    let style = |c: &deck_core::term::RenderCell| (c.fg, c.bg, c.bold, c.underline, c.strike, c.wide);
                     // the blank half of a wide character stays with it
                     while end < row.len() && (style(&row[end]) == style(&first) || (end > x && row[end - 1].wide)) {
                         let c = if row[end].c == '\0' { ' ' } else { row[end].c };
@@ -1761,6 +1774,14 @@ impl Deck {
                         for (i, u) in c.encode_utf16(&mut buf).iter().enumerate() {
                             text.push(*u);
                             dx.push(if i == 0 { cw } else { 0 });
+                        }
+                        // combining characters take no room of their own: they
+                        // are drawn over the character before them
+                        for m in row[end].marks.iter().take_while(|&&m| m != '\0') {
+                            for u in m.encode_utf16(&mut buf).iter() {
+                                text.push(*u);
+                                dx.push(0);
+                            }
                         }
                         end += 1;
                     }
@@ -1784,6 +1805,13 @@ impl Deck {
                     }
                     if first.underline {
                         let line = RECT { left: r.left, top: y + ch - 1, right: r.right, bottom: y + ch };
+                        let b = CreateSolidBrush(rgb(first.fg));
+                        FillRect(dc, &line, b);
+                        let _ = DeleteObject(b.into());
+                    }
+                    if first.strike {
+                        let mid = y + ch / 2;
+                        let line = RECT { left: r.left, top: mid, right: r.right, bottom: mid + 1 };
                         let b = CreateSolidBrush(rgb(first.fg));
                         FillRect(dc, &line, b);
                         let _ = DeleteObject(b.into());

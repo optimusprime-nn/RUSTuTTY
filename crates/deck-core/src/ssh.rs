@@ -951,7 +951,7 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
                 Some(Command::Special(crate::session::Special::Rekey)) => handle.rekey_soon().await?,
                 // russh can't send IGNORE: a keepalive also keeps the connection busy
                 Some(Command::Special(crate::session::Special::Ignore)) => handle.send_keepalive(false).await?,
-                Some(Command::Special(_)) => {}
+                Some(Command::Special(_) | Command::Reconfigure(_)) => {}
                 Some(Command::Resize { cols: c, rows: r }) => {
                     if (c, r) != (cols, rows) {
                         (cols, rows) = (c, r);
