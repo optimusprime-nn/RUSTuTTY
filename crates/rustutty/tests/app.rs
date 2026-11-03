@@ -628,6 +628,85 @@ async fn the_window_has_a_scrollbar_that_follows_the_scrollback() {
     assert_eq!(info.nPos, info.nMax - info.nPage as i32 + 1, "the view starts at the bottom");
 }
 
+/// Clicks are counted by RUSTuTTY: a double click selects a word, a triple
+/// click the line, and a program with the mouse gets every press, however fast.
+#[tokio::test(flavor = "multi_thread")]
+async fn double_and_triple_clicks() {
+    let peer = Peer::start().await;
+    let app = App::start(&raw_args(peer.port));
+    peer.connected(1).await;
+    peer.send(0, b"alpha beta gamma");
+    app.sees("row=alpha beta gamma").await;
+    let cell = app.cell();
+    let at = |col: i32| ((cell.1 / 2) << 16 | (col * cell.0 + cell.0 / 2)) as isize;
+    let clicks = |n: usize| {
+        for _ in 0..n {
+            app.post(app.content, WM_LBUTTONDOWN, 1, at(7));
+            app.post(app.content, WM_LBUTTONUP, 0, at(7));
+        }
+    };
+    clicks(2);
+    app.until("a word", |d| field(d, "clip=") == "\"beta\"").await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    clicks(3);
+    app.until("the line", |d| field(d, "clip=").starts_with("\"alpha beta gamma")).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    // SGR mouse reporting: both presses of a double click go to the program
+    peer.send(0, b"\x1b[?1000h\x1b[?1006h");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let before = peer.received(0).len();
+    clicks(2);
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        let got = String::from_utf8_lossy(&peer.received(0)[before..]).to_string();
+        if got.matches("\x1b[<0;").count() >= 4 {
+            assert_eq!(got.matches('M').count(), 2, "two presses: {got:?}");
+            assert_eq!(got.matches('m').count(), 2, "two releases: {got:?}");
+            break;
+        }
+        assert!(Instant::now() < end, "both clicks reported, have {got:?}");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+}
+
+/// Alt and a character sends ESC and the character, by the same path as
+/// typing, so a character outside the basic plane arrives whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn alt_and_a_character() {
+    let peer = Peer::start().await;
+    let app = App::start(&raw_args(peer.port));
+    peer.connected(1).await;
+    app.post(app.content, WM_SYSCHAR, 'x' as usize, 0);
+    peer.wait(0, b"\x1bx").await;
+    app.post(app.content, WM_SYSCHAR, 0xD83D, 0);
+    app.post(app.content, WM_SYSCHAR, 0xDE00, 0);
+    peer.wait(0, "\x1b\u{1F600}".as_bytes()).await;
+}
+
+/// Small wheel movements, as a touchpad sends, add up to one step.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_wheel_adds_up_small_movements() {
+    let peer = Peer::start().await;
+    let app = App::start(&raw_args(peer.port));
+    peer.connected(1).await;
+    peer.send(0, b"x\x1b[?1000h\x1b[?1006h");
+    app.sees("row=x").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(app.content, &mut r).unwrap() };
+    let at = ((r.top + 20) as isize) << 16 | (r.left + 20) as isize & 0xffff;
+    for _ in 0..3 {
+        app.post(app.content, WM_MOUSEWHEEL, 30usize << 16, at);
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!String::from_utf8_lossy(&peer.received(0)).contains("\x1b[<64;"), "three quarters of a step sends nothing");
+    app.post(app.content, WM_MOUSEWHEEL, 30usize << 16, at);
+    peer.wait(0, b"\x1b[<64;").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(String::from_utf8_lossy(&peer.received(0)).matches("\x1b[<64;").count(), 1, "a whole step sends one report");
+}
+
 /// Dragging a selection above the text scrolls back, and keeps scrolling while
 /// the pointer is held there; dragging below scrolls forward again.
 #[tokio::test(flavor = "multi_thread")]
@@ -706,4 +785,11 @@ async fn the_wheel_and_scrollbar_scroll_back() {
     app.post(app.content, WM_MOUSEWHEEL, (-120i16 as u16 as usize) << 16, at);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(pos() > paged, "the wheel scrolls forward");
+    // the scrollbar's own menu: Top and Bottom
+    app.post(app.content, WM_VSCROLL, SB_TOP.0 as usize, 0);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(pos(), 0, "Top goes to the start of the scrollback");
+    app.post(app.content, WM_VSCROLL, SB_BOTTOM.0 as usize, 0);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(pos(), bottom, "Bottom goes back to the end");
 }

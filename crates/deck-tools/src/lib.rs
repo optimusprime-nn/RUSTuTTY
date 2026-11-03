@@ -312,7 +312,7 @@ pub async fn run_console(target: Target) -> anyhow::Result<String> {
                 err.write_all(&b)?;
                 err.flush()?;
             }
-            Some(Event::Closed(why)) => break why,
+            Some(Event::Closed(why, _)) => break why,
             None => break "The session ended.".to_string(),
         }
     };

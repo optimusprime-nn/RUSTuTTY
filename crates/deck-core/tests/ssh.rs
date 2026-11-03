@@ -43,7 +43,7 @@ impl Client {
     async fn pump(&mut self) -> bool {
         match self.rx.recv().await {
             Some(Event::Output(b) | Event::Local(b)) => self.output.push_str(&String::from_utf8_lossy(&b)),
-            Some(Event::Closed(why)) => self.closed = Some(why),
+            Some(Event::Closed(why, _)) => self.closed = Some(why),
             None => return false,
         }
         true
@@ -239,7 +239,7 @@ async fn refused_target_never_connects() {
     });
     let _tx = spawn(&tokio::runtime::Handle::current(), target, Arc::new(MemoryStore::default()), (80, 24), sink);
     let e = rx.recv().await.unwrap();
-    assert!(matches!(e, Event::Closed(ref s) if s.contains("proxy")), "{e:?}");
+    assert!(matches!(e, Event::Closed(ref s, _) if s.contains("proxy")), "{e:?}");
     let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
     assert!(accepted.is_err(), "nothing may connect");
 }
@@ -829,4 +829,35 @@ async fn a_local_proxy_refuses_a_host_that_would_be_a_command() {
     target.settings.set("ProxyTelnetCommand", text("nc %host %port"));
     let mut c = Client::open_target(target, Arc::new(MemoryStore::default()));
     assert!(c.closed().await.contains("isn't safe"));
+}
+
+/// The host hanging up is a clean exit for `CloseOnExit`; failing to connect isn't.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_closing_is_clean_and_an_error_is_not() {
+    async fn ended(port: u16) -> (String, bool) {
+        let (etx, mut rx) = unbounded_channel();
+        let sink = Arc::new(move |e| {
+            let _ = etx.send(e);
+        });
+        let _tx = spawn(&tokio::runtime::Handle::current(), Target::new(Protocol::Raw, "127.0.0.1", port), Arc::new(MemoryStore::default()), (80, 24), sink);
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(Event::Closed(why, clean)) = rx.recv().await {
+                    return (why, clean);
+                }
+            }
+        })
+        .await
+        .expect("session should close")
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut c, _) = listener.accept().await.unwrap();
+        c.write_all(b"bye\r\n").await.unwrap();
+    });
+    assert!(ended(port).await.1, "the host hung up");
+    // nothing listens on the port any more
+    let (why, clean) = ended(port).await;
+    assert!(!clean, "a refused connection isn't clean: {why}");
 }

@@ -167,6 +167,14 @@ struct Deck {
     /// Where the pointer last was while selecting, for the timer that keeps
     /// scrolling while it's held above or below the text.
     drag_at: LPARAM,
+    /// When the left button last went down, and whether that was the first,
+    /// second or third click in a row. Counted here, not by Windows, so a fast
+    /// second click still reaches a program that has the mouse, as in PuTTY.
+    clicks: (std::time::Instant, u32, LPARAM),
+    /// Wheel movement not yet acted on: one step is 120, and touchpads send less.
+    wheel: i32,
+    /// The key being handled is held down and repeating.
+    key_repeat: bool,
     focused: bool,
     started: std::time::Instant,
     cursor_off: bool,
@@ -510,7 +518,11 @@ impl Deck {
 
     fn on_scrollbar(&mut self, wp: WPARAM) {
         let code = SCROLLBAR_COMMAND((wp.0 & 0xffff) as i32);
-        let thumb = (wp.0 >> 16) as usize & 0xffff;
+        // the message holds only 16 bits of the thumb's place, and scrollback
+        // can be far longer, so ask the scrollbar for all of it
+        let mut info = SCROLLINFO { cbSize: std::mem::size_of::<SCROLLINFO>() as u32, fMask: SIF_TRACKPOS | SIF_POS, ..Default::default() };
+        let _ = unsafe { GetScrollInfo(self.content, SB_VERT, &mut info) };
+        let thumb = if code == SB_THUMBTRACK { info.nTrackPos } else { info.nPos }.max(0) as usize;
         if let Some(s) = self.current() {
             let page = s.term.size().1 as i32;
             let (history, _) = s.term.scroll_position();
@@ -520,6 +532,8 @@ impl Deck {
                 SB_PAGEUP => s.term.scroll(page),
                 SB_PAGEDOWN => s.term.scroll(-page),
                 SB_THUMBTRACK | SB_THUMBPOSITION => s.term.scroll_to(history.saturating_sub(thumb)),
+                SB_TOP => s.term.scroll_to(history),
+                SB_BOTTOM => s.term.scroll_to_bottom(),
                 _ => {}
             }
         }
@@ -578,6 +592,9 @@ impl Deck {
             return;
         }
         let (mode, sound, indicate) = (s.target.settings.i("Beep", 1), s.target.settings.s("BellWaveFile", ""), s.target.settings.i("BeepInd", 0));
+        // a visual bell flashes its own screen, so one in a session that isn't
+        // showing is left to the session list
+        let shown = self.current().is_some_and(|s| s.id == id);
         if cfg!(feature = "test-hooks") {
             return;
         }
@@ -586,6 +603,7 @@ impl Deck {
                 1 => {
                     let _ = MessageBeep(MB_OK);
                 }
+                2 if !shown => {}
                 2 => {
                     self.flash = true;
                     SetTimer(Some(self.content), TIMER_FLASH, FLASH_MS, None);
@@ -676,7 +694,8 @@ impl Deck {
         let s = &mut self.sessions[i];
         (s.id, s.tx, s.closed) = (id, tx, false);
         s.log.push("----- Session restarted -----".to_string());
-        s.term.feed(b"\x1b[!p\r\n");
+        s.term.soft_reset();
+        s.term.feed(b"\r\n");
         self.refresh_list();
         self.redraw();
     }
@@ -755,7 +774,7 @@ impl Deck {
         }
     }
 
-    /// A stray click can reach the close box, so it minds `WarnOnClose`.
+    /// Closing a session the user asked to close, by any route, minds `WarnOnClose`.
     fn close_from_list(&mut self, i: usize) {
         let warn = self.sessions.get(i).is_some_and(|s| !s.closed && s.target.settings.b("WarnOnClose", true));
         if !warn || self.confirm(&format!("Close {}?", self.sessions[i].label())) {
@@ -778,7 +797,7 @@ impl Deck {
                     s.log.extend(text.lines().map(deck_core::session::clean).filter(|l| !l.trim().is_empty()));
                     s.term.feed(&bytes);
                 }
-                Event::Closed(why) => {
+                Event::Closed(why, clean) => {
                     s.log.push(deck_core::session::clean(&why));
                     s.term.stop_printing();
                     s.job = None;
@@ -786,7 +805,6 @@ impl Deck {
                     s.closed = true;
                     list_changed = true;
                     // CloseOnExit is 0 for never, 1 for a clean exit, 2 for always
-                    let clean = why == "Server closed the session.";
                     let close = s.target.settings.i("CloseOnExit", 0);
                     if close == 2 || (close == 1 && clean) {
                         finished.push(id);
@@ -928,7 +946,11 @@ impl Deck {
             IDM_COPYALL => self.copy_all(),
             IDM_CLRSB | IDM_RESET => {
                 if let Some(s) = self.current() {
-                    s.term.feed(if id == IDM_CLRSB { b"\x1b[3J" } else { b"\x1bc" });
+                    if id == IDM_CLRSB {
+                        s.term.clear_scrollback();
+                    } else {
+                        s.term.reset();
+                    }
                 }
                 self.redraw();
             }
@@ -1158,10 +1180,22 @@ impl Deck {
             self.step(if shift { -1 } else { 1 });
             return true;
         }
-        if let Some(pad) = keypad_key(vk, extended) {
+        // Shift+Num Lock is left to Windows, as in PuTTY
+        if let Some(pad) = keypad_key(vk, extended).filter(|&p| !(p == b'G' && shift)) {
+            let repeat = self.key_repeat;
             if let Some(s) = self.current() {
                 let bytes = s.keys.keypad(pad, m, s.term.app_keypad());
                 if !bytes.is_empty() {
+                    if pad == b'G' && !repeat {
+                        // Num Lock was PF1, so put its light back as it was
+                        unsafe {
+                            let mut keys = [0u8; 256];
+                            if GetKeyboardState(&mut keys).is_ok() {
+                                keys[VK_NUMLOCK.0 as usize] ^= 1;
+                                let _ = SetKeyboardState(&keys);
+                            }
+                        }
+                    }
                     s.send(bytes);
                     self.redraw();
                     return true;
@@ -1193,7 +1227,7 @@ impl Deck {
             }
             Shortcut::CloseSession => {
                 if let Some(i) = self.active {
-                    self.close_session(i);
+                    self.close_from_list(i);
                 }
             }
             Shortcut::GoTo(i) => self.select(i),
@@ -1225,7 +1259,9 @@ impl Deck {
         true
     }
 
-    fn on_char(&mut self, unit: u16) {
+    /// A typed character. With Alt it goes as ESC and the character, as PuTTY
+    /// sends it, in the session's character set like any other.
+    fn on_char(&mut self, unit: u16, alt: bool) {
         let text = match (self.high_surrogate.take(), unit) {
             (None, 0xD800..=0xDBFF) => {
                 self.high_surrogate = Some(unit);
@@ -1236,6 +1272,7 @@ impl Deck {
         };
         let ascii = text.as_bytes().first().copied().filter(|b| text.len() == 1 && *b >= b' ' && *b < 0x7f);
         let text = match (self.compose_state, ascii) {
+            _ if alt => text,
             (2, Some(c)) => {
                 self.compose_first = c;
                 self.compose_state = 3;
@@ -1262,7 +1299,10 @@ impl Deck {
             if s.term.scroll_on_key() {
                 s.term.scroll_to_bottom();
             }
-            let bytes = s.term.encode_text(&text);
+            let mut bytes = s.term.encode_text(&text);
+            if alt {
+                bytes.insert(0, 0x1b);
+            }
             s.send(bytes);
         }
         self.redraw();
@@ -1303,8 +1343,11 @@ impl Deck {
             }
             return true;
         }
-        if vk == VK_RETURN.0 && !extended && settings.b("FullScreenOnAltEnter", false) {
-            self.toggle_full_screen();
+        // as PuTTY: once per press, and not when the window's size is locked
+        if vk == VK_RETURN.0 && !extended && settings.b("FullScreenOnAltEnter", false) && settings.i("LockSize", 0) != 1 {
+            if !self.key_repeat {
+                self.toggle_full_screen();
+            }
             return true;
         }
         if vk == VK_MENU.0 {
@@ -1431,15 +1474,40 @@ impl Deck {
         self.report(button, self.cell_at(lp), true, true)
     }
 
-    fn report_wheel(&mut self, wp: WPARAM, lp: LPARAM) -> bool {
-        let delta = ((wp.0 >> 16) & 0xffff) as i16;
+    /// Adds up wheel movement and acts once per whole step, as PuTTY does, so a
+    /// touchpad's many small movements don't each scroll or each send a report.
+    fn on_wheel(&mut self, wp: WPARAM, lp: LPARAM) {
+        self.wheel += ((wp.0 >> 16) & 0xffff) as i16 as i32;
         // the wheel's position is in screen coordinates
         let mut p = POINT { x: (lp.0 & 0xffff) as i16 as i32, y: ((lp.0 >> 16) & 0xffff) as i16 as i32 };
         unsafe {
             let _ = ScreenToClient(self.content, &mut p);
         }
-        let cell = ((p.x / self.cell.0).max(0) as usize, (p.y / self.cell.1).max(0) as usize);
-        self.report(if delta > 0 { 64 } else { 65 }, cell, true, false)
+        let b = self.border();
+        let cell = (((p.x - b) / self.cell.0).max(0) as usize, ((p.y - b) / self.cell.1).max(0) as usize);
+        while self.wheel.abs() >= WHEEL_DELTA as i32 {
+            let up = self.wheel > 0;
+            self.wheel -= if up { WHEEL_DELTA as i32 } else { -(WHEEL_DELTA as i32) };
+            if !self.report(if up { 64 } else { 65 }, cell, true, false) {
+                if let Some(s) = self.current() {
+                    s.term.scroll(if up { SCROLL_STEP } else { -SCROLL_STEP });
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    /// Counts this press as the first, second or third click in a row: quick
+    /// enough, and close enough to the last, by the system's double-click rules.
+    fn count_click(&mut self, lp: LPARAM) -> u32 {
+        let now = std::time::Instant::now();
+        let quick = now.duration_since(self.clicks.0).as_millis() < unsafe { GetDoubleClickTime() } as u128;
+        let at = |l: LPARAM| ((l.0 & 0xffff) as i16 as i32, ((l.0 >> 16) & 0xffff) as i16 as i32);
+        let ((x, y), (lx, ly)) = (at(lp), at(self.clicks.2));
+        let near = unsafe { (x - lx).abs() * 2 <= GetSystemMetrics(SM_CXDOUBLECLK) && (y - ly).abs() * 2 <= GetSystemMetrics(SM_CYDOUBLECLK) };
+        let n = if quick && near { self.clicks.1 % 3 + 1 } else { 1 };
+        self.clicks = (now, n, lp);
+        n
     }
 
     fn cell_at(&self, lp: LPARAM) -> (usize, usize) {
@@ -1470,7 +1538,7 @@ impl Deck {
             (ID_PASTE_ALL, BN_CLICKED) => self.paste_all(),
             (ID_MENU_CLOSE, _) => {
                 if let Some(i) = self.active {
-                    self.close_session(i);
+                    self.close_from_list(i);
                 }
             }
             (ID_MENU_NEW, _) => self.edit_saved(None),
@@ -1864,6 +1932,10 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
 
 unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let Some(d) = deck() else { return DefWindowProcW(hwnd, msg, wp, lp) };
+    // any click on the terminal gives it the keyboard, whoever gets the click
+    if matches!(msg, WM_LBUTTONDOWN | WM_MBUTTONDOWN | WM_RBUTTONDOWN) {
+        take_focus(hwnd);
+    }
     match msg {
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
@@ -1893,10 +1965,12 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_KEYDOWN => {
             d.cursor_off = false;
             let extended = lp.0 >> 24 & 1 != 0;
+            d.key_repeat = lp.0 >> 30 & 1 != 0;
             d.skip_char = d.key_down_with(wp.0 as u16, Mods { shift: shift_down(), ctrl: ctrl_down(), alt: false }, extended);
         }
         WM_SYSKEYDOWN => {
             let extended = lp.0 >> 24 & 1 != 0;
+            d.key_repeat = lp.0 >> 30 & 1 != 0;
             if !d.sys_key(wp.0 as u16, shift_down(), extended) {
                 return DefWindowProcW(hwnd, msg, wp, lp);
             }
@@ -1909,40 +1983,35 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_VSCROLL => d.on_scrollbar(wp),
         WM_CHAR => {
             if !std::mem::take(&mut d.skip_char) {
-                d.on_char(wp.0 as u16);
+                d.on_char(wp.0 as u16, false);
             }
         }
-        WM_SYSCHAR => {
-            if let Some(s) = d.current() {
-                let c = char::from_u32(wp.0 as u32).unwrap_or(' ');
-                s.send(format!("\x1b{c}").into_bytes());
-            }
-        }
+        WM_SYSCHAR => d.on_char(wp.0 as u16, true),
         // Ctrl and the right button is PuTTY's way to the window menu, in any program.
         WM_RBUTTONUP if ctrl_down() => d.context_menu(),
         // A program with mouse reporting on gets the mouse, unless Shift is held.
-        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN | WM_MBUTTONUP
-            if !d.selecting && d.report_mouse(msg, lp) => {}
+        // The press is captured, so a release outside the window still arrives.
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN if !d.selecting && d.report_mouse(msg, lp) => {
+            SetCapture(hwnd);
+        }
+        WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP if !d.selecting && d.report_mouse(msg, lp) => {
+            let _ = ReleaseCapture();
+        }
         WM_MOUSEMOVE if !d.selecting && wp.0 & 0x13 != 0 && d.report_drag(wp, lp) => {}
-        WM_MOUSEWHEEL if d.report_wheel(wp, lp) => {}
+        WM_MOUSEWHEEL => d.on_wheel(wp, lp),
+        // a second click selects a word and a third the line, and dragging then
+        // goes by words or lines
         WM_LBUTTONDOWN => {
-            take_focus(hwnd);
             let (x, y) = d.cell_at(lp);
             SetCapture(hwnd);
             d.selecting = true;
             let flip = alt_down();
+            let n = d.count_click(lp);
             if let Some(s) = d.current() {
-                s.term.select_start_with(x, y, flip);
-            }
-            d.redraw();
-        }
-        WM_LBUTTONDBLCLK => {
-            let (x, y) = d.cell_at(lp);
-            let auto = d.autocopy();
-            if let Some(s) = d.current() {
-                s.term.select_word(x, y);
-                if let (true, Some(text)) = (auto, s.term.selected_text()) {
-                    copy_out(&s.target.settings, &text);
+                match n {
+                    2 => s.term.select_word(x, y),
+                    3 => s.term.select_line(y),
+                    _ => s.term.select_start_with(x, y, flip),
                 }
             }
             d.redraw();
@@ -1969,13 +2038,6 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             1 => d.extend_or_paste(true, lp),
             _ => d.context_menu(),
         },
-        WM_MOUSEWHEEL => {
-            let delta = ((wp.0 >> 16) & 0xffff) as i16 as i32;
-            if let Some(s) = d.current() {
-                s.term.scroll(delta.signum() * SCROLL_STEP);
-            }
-            d.redraw();
-        }
         _ => return DefWindowProcW(hwnd, msg, wp, lp),
     }
     LRESULT(0)
@@ -2061,7 +2123,7 @@ fn main() {
             ..Default::default()
         });
         RegisterClassW(&WNDCLASSW {
-            style: CS_DBLCLKS,
+            // no CS_DBLCLKS: clicks are counted in count_click
             lpfnWndProc: Some(content_proc),
             hInstance: instance,
             hCursor: cursor,
@@ -2103,7 +2165,7 @@ fn main() {
             cell: (8, 16), dpi: GetDpiForWindow(main).max(96), font_in_use: (String::new(), 0),
             sessions: Vec::new(), active: None, next_id: 1, saved,
             inbox: Default::default(), rt, store,
-            skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), focused: false,
+            skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), clicks: (std::time::Instant::now(), 0, LPARAM(0)), wheel: 0, key_repeat: false, focused: false,
             started: std::time::Instant::now(), cursor_off: false, flash: false, pointer_hidden: false, compose_state: 0, compose_first: 0, full_screen: None, close_held: None, system_items: 0,
         }));
         DECK.store(d, Ordering::Release);
@@ -2144,7 +2206,7 @@ fn main() {
             if msg.hwnd == d.list && (msg.message == WM_MBUTTONUP || msg.message == WM_RBUTTONUP) {
                 if let Some(i) = d.row_from_point(d.list, msg.lParam) {
                     if msg.message == WM_MBUTTONUP {
-                        d.close_session(i);
+                        d.close_from_list(i);
                     } else {
                         d.session_menu(i);
                     }

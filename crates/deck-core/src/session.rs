@@ -87,8 +87,10 @@ pub enum Event {
     Output(Vec<u8>),
     /// Prompts and messages from this end, which stay out of session logs.
     Local(Vec<u8>),
-    /// The session is over. The reason is shown in its terminal.
-    Closed(String),
+    /// The session is over. The reason is shown in its terminal. The flag is
+    /// true when the far end ended it normally, not on an error, which is what
+    /// `CloseOnExit` means by a clean exit.
+    Closed(String, bool),
 }
 
 pub type EventSink = Arc<dyn Fn(Event) + Send + Sync>;
@@ -344,10 +346,10 @@ pub fn spawn(
         } else {
             run(&target, store, io).await
         };
-        events(Event::Closed(match result {
-            Ok(why) => why,
-            Err(e) => e.to_string(),
-        }));
+        events(match result {
+            Ok(why) => Event::Closed(why, true),
+            Err(e) => Event::Closed(e.to_string(), false),
+        });
     });
     tx
 }

@@ -212,7 +212,7 @@ pub const OPTIONS: &[Option_] = &[
 /// Acted on, with no entry in `OPTIONS`. The proxy password is typed when needed,
 /// or kept as saved, and the settings window's masked box edits it. SSH logs hold no passwords
 /// or packets, so the `SSHLogOmit` settings are always met.
-pub const AUTOMATIC: &[&str] = &["ProxyPassword", "PingInterval", "ProxyLogToTerm", "Present", "SSHLogOmitData", "SSHLogOmitPasswords", "NoRemoteResize", "WinNameAlways"];
+pub const AUTOMATIC: &[&str] = &["ProxyPassword", "PingInterval", "ProxyLogToTerm", "Present", "SSHLogOmitData", "SSHLogOmitPasswords", "WinNameAlways"];
 
 /// Settings for things that don't exist on Windows or in a Unicode terminal.
 pub const NOT_APPLICABLE: &[&str] = &["OSXCommandMeta", "OSXOptionMeta", "LoginShell", "StampUtmp", "WindowClass", "TryPalette", "AuthTIS", "RawCNP", "FontVTMode"];
@@ -225,6 +225,7 @@ pub const NOT_DONE: &[(&str, &[&str])] = &[
     ("SSH-1, which russh doesn't have", &["SshProt"]),
     ("alacritty_terminal has no way to do these", &["BCE", "BlinkText", "CJKAmbigWide", "DisableArabicShaping", "DisableBidi", "UTF8Override", "UTF8linedraw"]),
     ("The deck always keeps its own Ctrl+Shift+C and V", &["CtrlShiftCV"]),
+    ("Hosts can't resize the window yet, so there's nothing to refuse", &["NoRemoteResize"]),
 ];
 
 #[cfg(test)]

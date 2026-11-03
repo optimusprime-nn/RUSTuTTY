@@ -7,8 +7,8 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor};
-use crate::filter::{Action, Filter, FilterConfig};
+use alacritty_terminal::vte::ansi::{ClearMode, Color, CursorShape, CursorStyle, Handler, NamedColor, Processor};
+use crate::filter::{Action, Filter, FilterConfig, ERASE_IN_PLACE};
 use encoding_rs::{Decoder, Encoder, Encoding, UTF_8};
 use crate::settings::Settings;
 use std::sync::{Arc, Mutex};
@@ -186,6 +186,11 @@ pub struct Terminal {
     palette: Palette,
     mouse_reports: bool,
     bracketed_paste: bool,
+    /// The session's starting modes, put back by a reset.
+    start: Vec<u8>,
+    /// `NoRemoteWinTitle` off: the host may set the title, and a title query
+    /// then reports its title rather than the session's own.
+    remote_title: bool,
     filter: Filter,
     decoder: Option<Decoder>,
     encoder: Option<Encoder>,
@@ -262,7 +267,8 @@ impl Terminal {
             filter: Filter::new(FilterConfig::new(s)),
             decoder: (encoding != UTF_8).then(|| encoding.new_decoder_without_bom_handling()),
             encoder: (encoding != UTF_8).then(|| encoding.new_encoder()),
-            title: String::new(),
+            title: s.s("WinTitle", ""),
+            remote_title: !s.b("NoRemoteWinTitle", false),
             scroll_on_output: s.b("ScrollOnDisp", true),
             scroll_on_key: s.b("ScrollOnKey", false),
             paste_controls: s.b("PasteControls", false),
@@ -274,6 +280,7 @@ impl Terminal {
             palette: Palette::from_settings(s),
             mouse_reports: !s.b("NoMouseReporting", false),
             bracketed_paste: !s.b("DisableBracketedPaste", false),
+            start: Vec::new(),
         };
         // the settings that are modes a host could also set later
         let mut start = Vec::new();
@@ -296,7 +303,37 @@ impl Terminal {
             }
         }
         t.parser.advance(&mut t.term, &start);
+        t.start = start;
         t
+    }
+
+    /// Clear Scrollback from the menu. It goes straight to the terminal, not
+    /// through the filter, which may be set to refuse a host asking the same.
+    pub fn clear_scrollback(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+        self.term.grid_mut().clear_history();
+    }
+
+    /// Reset Terminal from the menu: back to how the session started, with its
+    /// own starting modes, not the terminal library's.
+    pub fn reset(&mut self) {
+        self.parser.advance(&mut self.term, b"\x1bc");
+        self.parser.advance(&mut self.term, &self.start);
+    }
+
+    /// Clears the screen without pushing it into the scrollback, for
+    /// `EraseToScrollback` off. The cursor and the host's saved cursor stay.
+    fn erase_in_place(&mut self) {
+        let at = self.term.grid().cursor.point;
+        self.term.grid_mut().cursor.point = Point::new(Line(0), Column(0));
+        self.term.clear_screen(ClearMode::Below);
+        self.term.grid_mut().cursor.point = at;
+    }
+
+    /// A soft reset for a restarted session, which keeps the screen.
+    pub fn soft_reset(&mut self) {
+        self.parser.advance(&mut self.term, b"\x1b[!p");
+        self.parser.advance(&mut self.term, &self.start);
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -312,7 +349,19 @@ impl Terminal {
         };
         let mut actions = Vec::new();
         let filtered = self.filter.feed(bytes, &mut actions);
-        self.parser.advance(&mut self.term, &filtered);
+        // output that changes selected text ends the selection, as in PuTTY, so
+        // a copy can't give text that's no longer on the screen
+        let selected = self.term.selection.is_some().then(|| self.term.selection_to_string());
+        let mut rest = &filtered[..];
+        while let Some(at) = rest.windows(ERASE_IN_PLACE.len()).position(|w| w == ERASE_IN_PLACE) {
+            self.parser.advance(&mut self.term, &rest[..at]);
+            self.erase_in_place();
+            rest = &rest[at + ERASE_IN_PLACE.len()..];
+        }
+        self.parser.advance(&mut self.term, rest);
+        if selected.is_some_and(|before| self.term.selection_to_string() != before) {
+            self.term.selection = None;
+        }
         for a in actions {
             let reply = match a {
                 Action::Reply(b) => b,
@@ -370,8 +419,9 @@ impl Terminal {
     pub fn take_events(&mut self) -> Vec<TermEvent> {
         let events = std::mem::take(&mut *self.events.0.lock().unwrap());
         for e in &events {
-            if let TermEvent::Title(t) = e {
-                self.title = t.clone();
+            match e {
+                TermEvent::Title(t) if self.remote_title => self.title = t.clone(),
+                _ => {}
             }
         }
         events
@@ -481,9 +531,22 @@ impl Terminal {
         self.term.selection = Some(sel);
     }
 
+    /// A double click. Dragging on from here extends by whole words.
     pub fn select_word(&mut self, col: usize, row: usize) {
+        self.select_whole(SelectionType::Semantic, col, row);
+    }
+
+    /// A triple click. Dragging on from here extends by whole lines.
+    pub fn select_line(&mut self, row: usize) {
+        self.select_whole(SelectionType::Lines, 0, row);
+    }
+
+    fn select_whole(&mut self, kind: SelectionType, col: usize, row: usize) {
         let p = self.point(col, row);
-        self.term.selection = Some(Selection::new(SelectionType::Semantic, p, Side::Left));
+        self.anchor = Some(p);
+        self.kind = kind;
+        self.dragged = true;
+        self.term.selection = Some(Selection::new(kind, p, Side::Left));
     }
 
     pub fn has_selection(&self) -> bool {
@@ -638,6 +701,77 @@ mod tests {
         assert_ne!(t.screen().rows[0][5].bg, (0, 0, 0), "selection is highlighted");
         t.clear_selection();
         assert!(!t.has_selection());
+    }
+
+    #[test]
+    fn clearing_without_scrollback_keeps_the_hosts_saved_cursor() {
+        let mut s = Settings::default();
+        s.set("EraseToScrollback", Value::Int(0));
+        let mut t = Terminal::with_settings(20, 4, &s);
+        t.feed(b"one\r\ntwo\r\nthree\x1b[2;3H\x1b7\x1b[4;1H\x1b[2J");
+        assert_eq!(t.scroll_position().0, 0, "nothing went to the scrollback");
+        assert!((0..4).all(|r| t.row_text(r).trim().is_empty()), "the screen is clear");
+        t.feed(b"\x1b8X");
+        assert_eq!(t.row_text(1).trim_end(), "  X", "the host's saved cursor survived");
+    }
+
+    #[test]
+    fn a_refused_title_is_not_reported() {
+        let mut s = Settings::default();
+        s.set("NoRemoteWinTitle", Value::Int(1));
+        s.set("RemoteQTitleAction", Value::Int(2));
+        s.set("WinTitle", Value::Str("mine".into()));
+        let mut t = Terminal::with_settings(20, 4, &s);
+        t.feed(b"\x1b]2;theirs\x07");
+        t.take_events();
+        t.feed(b"\x1b[21t");
+        let replies: Vec<_> = t.take_events().into_iter().filter_map(|e| if let TermEvent::Reply(r) = e { Some(r) } else { None }).collect();
+        assert_eq!(replies, [b"\x1b]lmine\x1b\\".to_vec()]);
+    }
+
+    #[test]
+    fn the_menus_clear_and_reset_skip_the_host_filter() {
+        let mut s = Settings::default();
+        s.set("NoRemoteClearScroll", crate::settings::Value::Int(1));
+        s.set("AutoWrapMode", crate::settings::Value::Int(0));
+        let mut t = Terminal::with_settings(20, 3, &s);
+        t.feed(&b"line\r\n".repeat(10));
+        t.feed(b"\x1b[3J");
+        assert!(t.scroll_position().0 > 0, "the host's request is refused");
+        t.clear_scrollback();
+        assert_eq!(t.scroll_position().0, 0, "the menu's isn't");
+        t.feed(b"\x1b[?7h");
+        t.reset();
+        t.feed(&b"x".repeat(25));
+        assert_eq!(t.row_text(1).trim(), "", "a reset keeps the session's own wrap setting");
+    }
+
+    #[test]
+    fn output_over_a_selection_ends_it() {
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"copy me please\r\nsecond line");
+        t.select_start(5, 0);
+        t.select_to(6, 0);
+        t.feed(b" more on line two");
+        assert_eq!(t.selected_text().as_deref(), Some("me"), "output elsewhere leaves it");
+        t.feed(b"\x1b[1;6Hus");
+        assert!(!t.has_selection(), "output over the selected text ends it");
+    }
+
+    #[test]
+    fn double_and_triple_click_select_words_and_lines() {
+        let mut t = Terminal::new(30, 5);
+        t.feed(b"alpha beta gamma\r\nnext");
+        t.select_word(7, 0);
+        assert_eq!(t.selected_text().as_deref(), Some("beta"));
+        t.select_to(12, 0);
+        assert_eq!(t.selected_text().as_deref(), Some("beta gamma"), "dragging goes by words");
+        t.select_line(0);
+        assert_eq!(t.selected_text().as_deref(), Some("alpha beta gamma\n"));
+        t.select_to(2, 1);
+        let text = t.selected_text().unwrap();
+        assert!(text.starts_with("alpha beta gamma
+") && text.contains("next"), "dragging goes by lines: {text:?}");
     }
 
     #[test]
@@ -953,12 +1087,12 @@ mod scrollback {
     fn apts_progress_line_loses_nothing_above_it() {
         // apt keeps "Progress: [ 40%]" on the last line by scrolling only the lines above
         let mut t = term();
-        t.feed(b"7[0;23r8");
+        t.feed(b"\x1b7\x1b[0;23r\x1b8");
         for i in 0..500 {
             t.feed(format!("B{i:04}x Setting up\r\n").as_bytes());
-            t.feed(b"7[24;0f[42mProgress: [ 40%][49m8");
+            t.feed(b"\x1b7\x1b[24;0f\x1b[42mProgress: [ 40%]\x1b[49m\x1b8");
         }
-        t.feed(b"7[0;24r8[24;0f[J");
+        t.feed(b"\x1b7\x1b[0;24r\x1b8\x1b[24;0f\x1b[J");
         assert_eq!(missing(&mut t, 500, "B"), Vec::<usize>::new());
     }
 
@@ -966,7 +1100,7 @@ mod scrollback {
     fn clearing_the_screen_keeps_it_in_scrollback() {
         let mut t = term();
         t.feed(&lines("C", 100, 10));
-        t.feed(b"[H[2J");
+        t.feed(b"\x1b[H\x1b[2J");
         t.feed(&lines("D", 10, 10));
         assert_eq!(missing(&mut t, 100, "C"), Vec::<usize>::new());
     }

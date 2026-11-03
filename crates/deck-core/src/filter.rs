@@ -36,11 +36,49 @@ impl FilterConfig {
             ansi_colour: s.b("ANSIColour", true),
             xterm256: s.b("Xterm256Colour", true),
             true_colour: s.b("TrueColour", true),
-            answerback: s.s("Answerback", "PuTTY").into_bytes(),
+            answerback: ctrl_parse(&s.s("Answerback", "PuTTY")),
             title_query: s.i("RemoteQTitleAction", 1),
             printer: !s.s("Printer", "").is_empty(),
         }
     }
+}
+
+/// Put in the filtered output where the screen is to be cleared without
+/// pushing it into the scrollback. `Terminal::feed` acts on it; the terminal
+/// library would ignore it as an unknown OSC.
+pub const ERASE_IN_PLACE: &[u8] = b"\x1b]rustutty;erase\x07";
+
+/// PuTTY's `^` notation for control characters, as in `Answerback`: `^M` is
+/// CR, `^?` DEL, `^~` a caret, and `^<27>` any byte by number. Anything else
+/// stays as written.
+pub fn ctrl_parse(text: &str) -> Vec<u8> {
+    let b = text.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let next = b.get(i + 1).copied();
+        let (byte, used) = match (b[i], next) {
+            (b'^', Some(c @ b'a'..=b'z')) => (c - b'a' + 1, 2),
+            (b'^', Some(c)) if (b'@'..=b'_').contains(&c) || c == b'?' || c >= 0x80 => (c ^ b'@', 2),
+            (b'^', Some(b'~')) => (b'^', 2),
+            (b'^', Some(b'<')) => match b[i + 2..].iter().position(|&c| c == b'>').and_then(|end| {
+                let n = std::str::from_utf8(&b[i + 2..i + 2 + end]).ok()?;
+                let v = match n.strip_prefix("0x").or_else(|| n.strip_prefix("0X")) {
+                    Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                    None if n.len() > 1 && n.starts_with('0') => u32::from_str_radix(&n[1..], 8).ok()?,
+                    None => n.parse().ok()?,
+                };
+                Some((v as u8, end + 3))
+            }) {
+                Some(found) => found,
+                None => (b'^', 1),
+            },
+            (c, _) => (c, 1),
+        };
+        out.push(byte);
+        i += used;
+    }
+    out
 }
 
 #[derive(Debug, PartialEq)]
@@ -161,8 +199,9 @@ impl Filter {
             (b"?4", b'i') => Some(Vec::new()),
             ([b'?', ..], b'h' | b'l') => self.private_modes(params, last),
             (_, b'J') if first == Some(3) && c.no_clear_scroll => Some(Vec::new()),
-            // keeps the old screen out of the scrollback; the cursor stays put
-            (_, b'J') if first == Some(2) && !c.erase_to_scrollback => Some(b"\x1b7\x1b[H\x1b[J\x1b8".to_vec()),
+            // keeps the old screen out of the scrollback; the terminal does it
+            // itself, so the host's saved cursor isn't used up
+            (_, b'J') if first == Some(2) && !c.erase_to_scrollback => Some(ERASE_IN_PLACE.to_vec()),
             (_, b't') if first == Some(21) => {
                 match c.title_query {
                     1 => actions.push(Action::Reply(b"\x1b]l\x1b\\".to_vec())),
@@ -499,10 +538,19 @@ mod tests {
     }
 
     #[test]
+    fn answerback_takes_control_character_notation() {
+        assert_eq!(ctrl_parse("PuTTY^M"), b"PuTTY\r");
+        assert_eq!(ctrl_parse("^j^?^[^~"), b"\n\x7f\x1b^");
+        assert_eq!(ctrl_parse("^<27>^<0x41>^<010>"), b"\x1bA\x08");
+        assert_eq!(ctrl_parse("a^"), b"a^", "a lone caret stays");
+        assert_eq!(ctrl_parse("^<x>"), b"^<x>", "so does one that isn't a number");
+    }
+
+    #[test]
     fn clearing_rules() {
         assert_eq!(run(&mut filter(&[("NoRemoteClearScroll", 1)]), b"\x1b[3J").0, b"");
         assert_eq!(run(&mut filter(&[]), b"\x1b[2J").0, b"\x1b[2J");
-        assert_eq!(run(&mut filter(&[("EraseToScrollback", 0)]), b"\x1b[2J").0, b"\x1b7\x1b[H\x1b[J\x1b8");
+        assert_eq!(run(&mut filter(&[("EraseToScrollback", 0)]), b"\x1b[2J").0, ERASE_IN_PLACE);
     }
 
     #[test]
