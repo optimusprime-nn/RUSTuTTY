@@ -56,8 +56,17 @@ Window > Behaviour turns the question off.
 | `Ctrl+Shift+T` | New session: puts the cursor in the `user@host` box |
 | `Ctrl+Shift+D` | Duplicate this session |
 | `Ctrl+Shift+W` | Close this session |
-| `Shift+PgUp` / `Shift+PgDn` | Scroll back and forward |
+| `Shift+PgUp` / `Shift+PgDn` | Scroll back and forward half a screen |
+| `Ctrl+PgUp` / `Ctrl+PgDn` | Scroll back and forward a line |
+| `Ctrl+Shift+PgUp` / `Ctrl+Shift+PgDn` | Go to the top or bottom of the scrollback |
+| `Ctrl+Break` | Send a break, for Telnet and serial sessions |
+| `Ctrl+Pause` | Application keypad mode on or off |
 | `Alt+Enter` | Full screen, if turned on in Window > Behaviour |
+
+Selecting works as in PuTTY: double-click selects a word and triple-click a
+line, and dragging on from either goes by words or lines. Drag past the top or
+bottom of the window to scroll while selecting. The middle button (or the right
+one, in xterm style) moves the nearer end of a selection.
 
 ## The window menu
 
@@ -70,7 +79,7 @@ the same menu with **Close session** added.
 | --- | --- |
 | Copy, Paste | As above |
 | Special Command | Sends a protocol command: Break, Are You There, a signal, and so on. Only shown for protocols that have them |
-| Event Log | What happened while connecting: the server's version, the algorithms agreed, forwarding set up |
+| Event Log | A window of what the connection did, with times: where it connected, the host key, the login, the channel and forwarding set up, and why it ended. It keeps up while open, and **Copy all** copies it |
 | New Session... | Opens the settings window for a new session |
 | Restart Session | Connects a session that has ended |
 | Duplicate Session | Opens another session with the same settings |

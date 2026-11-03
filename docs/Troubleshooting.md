@@ -16,7 +16,7 @@ in RUSTuTTY.
 ## A server is refused, or the connection drops at once
 
 Open the **Event Log** from the window menu. It shows how far the connection
-got and which algorithms each side offered. RUSTuTTY doesn't offer SSH-1,
+got, and its last line says why it ended. RUSTuTTY doesn't offer SSH-1,
 single DES, or the algorithms PuTTY lists below "warn below here", and very old
 servers may have nothing in common with it. See
 [Differences from PuTTY](Differences-from-PuTTY.md).

@@ -31,6 +31,7 @@ Plink, PSCP and PSFTP all take these:
 | `-C` | Compress the connection |
 | `-A` / `-a` | Allow / don't allow agent forwarding, whatever a saved session says |
 | `-batch` | Never ask a question: fail instead, for scripts |
+| `-v` | Show the Event Log on standard error as the session goes |
 
 There's no `-pw`: a password on a command line can be read by other programs.
 
