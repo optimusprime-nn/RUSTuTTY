@@ -89,6 +89,8 @@ pub enum Action {
     PrintEnd,
     /// Mode 1015 on or off: mouse reports in urxvt's decimal form.
     UrxvtMouse(bool),
+    /// DECSCNM, mode 5: the whole screen in reverse video, or back.
+    ReverseVideo(bool),
 }
 
 /// The end of a print job, which is looked for in everything that's printed.
@@ -180,20 +182,56 @@ impl Filter {
         Some(if out.is_empty() { Vec::new() } else { format!("\x1b[{}m", out.join(";")).into_bytes() })
     }
 
-    fn private_modes(&self, params: &[u8], last: u8) -> Option<Vec<u8>> {
+    fn private_modes(&self, params: &[u8], last: u8, actions: &mut Vec<Action>) -> Option<Vec<u8>> {
         let text = String::from_utf8_lossy(&params[1..]);
-        // 2026 holds back the display, which would let a host freeze it
-        let dropped = |m: &&str| match m.parse::<u32>() {
-            Ok(47 | 1047 | 1048 | 1049) => self.config.no_alt_screen,
-            Ok(2026) => true,
-            _ => false,
-        };
-        let all: Vec<&str> = text.split(';').collect();
-        if !all.iter().any(|m| dropped(m)) {
+        let on = last == b'h';
+        // what each mode becomes: the same, another the terminal library
+        // knows, bytes of its own, or nothing
+        enum Becomes<'a> {
+            Same(&'a str),
+            Mode(&'static str),
+            Bytes(&'static [u8]),
+            Nothing,
+        }
+        let mut changed = false;
+        let all: Vec<Becomes> = text
+            .split(';')
+            .map(|m| {
+                let b = match m.parse::<u32>() {
+                    Ok(47 | 1047 | 1048 | 1049) if self.config.no_alt_screen => Becomes::Nothing,
+                    // the library has only 1049, which is 1047 with the cursor saved
+                    Ok(47 | 1047) => Becomes::Mode("1049"),
+                    Ok(1048) => Becomes::Bytes(if on { b"\x1b7" } else { b"\x1b8" }),
+                    // reverse video, which the library doesn't have
+                    Ok(5) => {
+                        actions.push(Action::ReverseVideo(on));
+                        Becomes::Nothing
+                    }
+                    // 2026 holds back the display, which would let a host freeze it
+                    Ok(2026) => Becomes::Nothing,
+                    _ => return Becomes::Same(m),
+                };
+                changed = true;
+                b
+            })
+            .collect();
+        if !changed {
             return None;
         }
-        let keep: Vec<&str> = all.into_iter().filter(|m| !dropped(m)).collect();
-        Some(if keep.is_empty() { Vec::new() } else { format!("\x1b[?{}{}", keep.join(";"), last as char).into_bytes() })
+        let mut out = Vec::new();
+        let mut modes: Vec<&str> = Vec::new();
+        for b in all {
+            match b {
+                Becomes::Same(m) => modes.push(m),
+                Becomes::Mode(m) => modes.push(m),
+                Becomes::Bytes(bytes) => out.extend_from_slice(bytes),
+                Becomes::Nothing => {}
+            }
+        }
+        if !modes.is_empty() {
+            out.extend(format!("\x1b[?{}{}", modes.join(";"), last as char).into_bytes());
+        }
+        Some(out)
     }
 
     /// What to do with a whole CSI sequence. `None` leaves it as it came.
@@ -210,7 +248,7 @@ impl Filter {
         match (params, last) {
             (b"5" | b"?5", b'i') if c.printer => Some(Vec::new()),
             (b"?4", b'i') => Some(Vec::new()),
-            ([b'?', ..], b'h' | b'l') => self.private_modes(params, last),
+            ([b'?', ..], b'h' | b'l') => self.private_modes(params, last, actions),
             (_, b'J') if first == Some(3) && c.no_clear_scroll => Some(Vec::new()),
             // keeps the old screen out of the scrollback; the terminal does it
             // itself, so the host's saved cursor isn't used up
@@ -528,6 +566,19 @@ mod tests {
         assert_eq!(run(&mut f, b"\x1b[?1049h").0, b"");
         assert_eq!(run(&mut f, b"\x1b[?1049;25h").0, b"\x1b[?25h");
         assert_eq!(run(&mut filter(&[]), b"\x1b[?1049h").0, b"\x1b[?1049h");
+    }
+
+    #[test]
+    fn older_alternate_screen_modes_and_reverse_video() {
+        let mut f = filter(&[]);
+        assert_eq!(run(&mut f, b"\x1b[?47h").0, b"\x1b[?1049h");
+        assert_eq!(run(&mut f, b"\x1b[?1047;25l").0, b"\x1b[?1049;25l");
+        assert_eq!(run(&mut f, b"\x1b[?1048h").0, b"\x1b7");
+        assert_eq!(run(&mut f, b"\x1b[?1048l").0, b"\x1b8");
+        let (out, actions) = run(&mut f, b"\x1b[?5;7h");
+        assert_eq!(out, b"\x1b[?7h");
+        assert_eq!(actions, [Action::ReverseVideo(true)]);
+        assert_eq!(run(&mut filter(&[("NoAltScreen", 1)]), b"\x1b[?1047h\x1b[?1048h").0, b"");
     }
 
     #[test]

@@ -142,7 +142,14 @@ pub enum TermEvent {
     Bell,
     Print(Vec<u8>),
     PrintEnd,
+    /// Reverse video on and straight off again: PuTTY makes sure that shows,
+    /// as a visual bell does.
+    Flash,
 }
+
+/// How long reverse video turned on and off must show for, as PuTTY's
+/// `VBELL_DELAY`.
+const FLASH_FOR: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// `PasteRTF`: text as rich text in a font, for pasting into a word processor.
 pub fn rtf(text: &str, font: &str, points: u32) -> String {
@@ -201,6 +208,8 @@ pub struct Terminal {
     remote_title: bool,
     /// Mode 1015: mouse reports in urxvt's form.
     urxvt_mouse: bool,
+    /// DECSCNM: the whole screen in reverse video, since when.
+    reverse: Option<std::time::Instant>,
     filter: Filter,
     decoder: Option<Decoder>,
     encoder: Option<Encoder>,
@@ -345,6 +354,7 @@ impl Terminal {
             title: s.s("WinTitle", ""),
             remote_title: !s.b("NoRemoteWinTitle", false),
             urxvt_mouse: false,
+            reverse: None,
             scroll_on_output: s.b("ScrollOnDisp", true),
             scroll_on_key: s.b("ScrollOnKey", false),
             paste_controls: s.b("PasteControls", false),
@@ -394,6 +404,7 @@ impl Terminal {
     /// own starting modes, not the terminal library's.
     pub fn reset(&mut self) {
         self.urxvt_mouse = false;
+        self.reverse = None;
         self.parser.advance(&mut self.term, b"\x1bc");
         self.parser.advance(&mut self.term, &self.start);
     }
@@ -453,6 +464,16 @@ impl Terminal {
                 }
                 Action::UrxvtMouse(on) => {
                     self.urxvt_mouse = on;
+                    continue;
+                }
+                Action::ReverseVideo(true) => {
+                    self.reverse.get_or_insert_with(std::time::Instant::now);
+                    continue;
+                }
+                Action::ReverseVideo(false) => {
+                    if self.reverse.take().is_some_and(|since| since.elapsed() < FLASH_FOR) {
+                        self.events.0.lock().unwrap().push(TermEvent::Flash);
+                    }
                     continue;
                 }
             };
@@ -741,7 +762,10 @@ impl Terminal {
         let content = self.term.renderable_content();
         let (cols, lines) = self.size();
         let p = &self.palette;
-        let blank = RenderCell { c: ' ', marks: ['\0'; MARKS], fg: p.fg, bg: p.bg, bold: false, underline: false, strike: false, wide: false };
+        // DECSCNM turns every cell about, blank ones too
+        let reverse = self.reverse.is_some();
+        let (blank_fg, blank_bg) = if reverse { (p.bg, p.fg) } else { (p.fg, p.bg) };
+        let blank = RenderCell { c: ' ', marks: ['\0'; MARKS], fg: blank_fg, bg: blank_bg, bold: false, underline: false, strike: false, wide: false };
         let mut rows = vec![vec![blank; cols]; lines];
         let offset = content.display_offset as i32;
         let selection = content.selection;
@@ -757,7 +781,7 @@ impl Terminal {
                 fg = (fg.0 / 3 * 2, fg.1 / 3 * 2, fg.2 / 3 * 2);
             }
             let selected = selection.is_some_and(|s| s.contains(item.point));
-            if cell.flags.contains(Flags::INVERSE) != selected {
+            if cell.flags.contains(Flags::INVERSE) ^ selected ^ reverse {
                 std::mem::swap(&mut fg, &mut bg);
             }
             if cell.flags.contains(Flags::HIDDEN) {
@@ -844,6 +868,32 @@ mod tests {
         assert_eq!(t.screen().rows[2][0].bg, (10, 20, 30), "so does a colour");
         assert_eq!(t.scroll_position().0, history, "the scrollback stays");
         assert_eq!(t.row_text(0).trim(), "line", "and so does the screen");
+    }
+
+    #[test]
+    fn reverse_video_turns_the_screen_about_and_a_quick_one_flashes() {
+        let mut t = Terminal::new(10, 2);
+        let normal = t.screen().rows[1][0];
+        t.feed(b"\x1b[?5h");
+        let turned = t.screen().rows[1][0];
+        assert_eq!((turned.fg, turned.bg), (normal.bg, normal.fg));
+        t.feed(b"\x1b[?5l");
+        assert_eq!(t.screen().rows[1][0].bg, normal.bg);
+        assert!(t.take_events().iter().any(|e| matches!(e, TermEvent::Flash)), "on and straight off shows as a flash");
+        t.feed(b"\x1b[?5h");
+        std::thread::sleep(FLASH_FOR + std::time::Duration::from_millis(20));
+        t.feed(b"\x1b[?5l");
+        assert!(!t.take_events().iter().any(|e| matches!(e, TermEvent::Flash)), "a long one was seen already");
+    }
+
+    #[test]
+    fn older_alternate_screen_modes_work() {
+        let mut t = Terminal::new(10, 3);
+        t.feed(b"main\x1b[?1047hother");
+        assert!(t.alt_screen());
+        t.feed(b"\x1b[?1047l");
+        assert!(!t.alt_screen());
+        assert_eq!(t.row_text(0).trim(), "main", "the main screen is back as it was");
     }
 
     #[test]

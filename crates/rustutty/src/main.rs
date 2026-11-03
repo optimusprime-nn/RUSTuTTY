@@ -821,6 +821,7 @@ impl Deck {
         let mut list_changed = false;
         let mut finished = Vec::new();
         let mut bells = Vec::new();
+        let mut flash = false;
         let active_id = self.current().map(|s| s.id);
         for (id, event) in events {
             let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) else { continue };
@@ -884,11 +885,19 @@ impl Deck {
                             list_changed = true;
                         }
                     }
+                    TermEvent::Flash if Some(id) == active_id => flash = true,
+                    TermEvent::Flash => {}
                 }
             }
         }
         for id in bells {
             self.ring(id);
+        }
+        if flash {
+            self.flash = true;
+            unsafe {
+                SetTimer(Some(self.content), TIMER_FLASH, FLASH_MS, None);
+            }
         }
         for id in finished {
             if let Some(i) = self.sessions.iter().position(|s| s.id == id) {
