@@ -9,6 +9,7 @@ use deck_core::hostkeys::{HostKeyStore, RegistryStore};
 use deck_core::session::{self, Command, Event, EventSink, BATCH};
 use deck_core::settings::Value;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use windows::Win32::System::Console::*;
@@ -24,9 +25,12 @@ pub struct Args {
     pub load: Option<String>,
     pub forwards: Vec<String>,
     pub no_shell: bool,
-    pub no_pty: bool,
+    /// `-T` or `-t`. `None` keeps the saved session's setting.
+    pub no_pty: Option<bool>,
     pub compress: bool,
-    pub agent: bool,
+    /// `-A` or `-a`. `None` keeps the saved session's setting, so `-a` can
+    /// turn off agent forwarding a session has saved.
+    pub agent: Option<bool>,
     pub batch: bool,
     pub rest: Vec<String>,
 }
@@ -38,6 +42,24 @@ pub fn safe_local_name(name: &str) -> bool {
     let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
         || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
     !(name.is_empty() || name == "." || name == ".." || device || name.ends_with(['.', ' ']) || name.contains(|c: char| c.is_control() || "/\\:*?\"<>|".contains(c)))
+}
+
+/// Refuses a download path that goes through a link or junction below the
+/// destination the user chose. The server picks the names inside it, and a
+/// name that happens to match a junction would write wherever that leads.
+/// `root` itself may be a link: the user chose it.
+pub fn no_links_below(root: &Path, target: &Path) -> anyhow::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let Ok(below) = target.strip_prefix(root) else { return Ok(()) };
+    let mut path = root.to_path_buf();
+    for part in below.components() {
+        path.push(part);
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0) {
+            anyhow::bail!("{} is a link or junction, so nothing is written through it", session::clean(&path.display().to_string()));
+        }
+    }
+    Ok(())
 }
 
 /// `-L 8080:host:80` or `-D 1080` as PuTTY's `L8080=host:80` or `D1080=`.
@@ -72,11 +94,11 @@ impl Args {
                 "-load" => out.load = Some(value("-load")?),
                 "-L" | "-R" | "-D" => out.forwards.push(forward_key(&a[1..], &value(&a)?)),
                 "-N" => out.no_shell = true,
-                "-T" => out.no_pty = true,
-                "-t" => out.no_pty = false,
+                "-T" => out.no_pty = Some(true),
+                "-t" => out.no_pty = Some(false),
                 "-C" => out.compress = true,
-                "-A" => out.agent = true,
-                "-a" => out.agent = false,
+                "-A" => out.agent = Some(true),
+                "-a" => out.agent = Some(false),
                 "-batch" => out.batch = true,
                 "-pw" => anyhow::bail!("-pw isn't supported: a password on a command line can be read by other programs"),
                 _ => out.rest.push(a),
@@ -98,12 +120,19 @@ impl Args {
         if let Some(u) = user {
             t.user = Some(u.to_string());
         }
+        self.apply(&mut t);
+        anyhow::ensure!(t.refuse.is_none(), "{}", t.refuse.clone().unwrap_or_default());
+        Ok(t)
+    }
+
+    /// What the command line says, over what the target had saved.
+    fn apply(&self, t: &mut Target) {
         if let Some(p) = &self.protocol {
             t.protocol = p.clone();
         }
         t.port = self.port.unwrap_or(t.port);
-        t.user = self.user.clone().or(t.user);
-        t.key_file = self.key.clone().or(t.key_file);
+        t.user = self.user.clone().or(t.user.take());
+        t.key_file = self.key.clone().or(t.key_file.take());
         if !self.forwards.is_empty() {
             let mut all = t.settings.s("PortForwardings", "");
             for f in &self.forwards {
@@ -114,16 +143,19 @@ impl Args {
             }
             t.settings.set("PortForwardings", Value::Str(all));
         }
-        for (key, on) in [("SshNoShell", self.no_shell), ("NoPTY", self.no_pty), ("Compression", self.compress), ("AgentFwd", self.agent)] {
+        for (key, on) in [("SshNoShell", self.no_shell), ("Compression", self.compress)] {
             if on {
                 t.settings.set(key, Value::Int(1));
+            }
+        }
+        for (key, choice) in [("NoPTY", self.no_pty), ("AgentFwd", self.agent)] {
+            if let Some(on) = choice {
+                t.settings.set(key, Value::Int(on as u32));
             }
         }
         if self.batch {
             t.settings.set(BATCH, Value::Int(1));
         }
-        anyhow::ensure!(t.refuse.is_none(), "{}", t.refuse.clone().unwrap_or_default());
-        Ok(t)
     }
 }
 
@@ -324,6 +356,28 @@ mod tests {
     #[test]
     fn plain_output_loses_escapes_and_keeps_lines() {
         assert_eq!(plain_bytes(b"a\x1b[2Jb\r\n\tc\x07"), b"a[2Jb\r\n\tc");
+    }
+
+    /// A saved session that forwards the agent and asks for no terminal.
+    fn saved() -> Target {
+        let mut t = Target::parse("host").unwrap();
+        t.settings.set("AgentFwd", Value::Int(1));
+        t.settings.set("NoPTY", Value::Int(1));
+        t
+    }
+
+    #[test]
+    fn a_and_t_override_what_a_session_saved() {
+        let mut t = saved();
+        parse("-a -t host").apply(&mut t);
+        assert!(!t.settings.b("AgentFwd", true));
+        assert!(!t.settings.b("NoPTY", true));
+        let mut t = saved();
+        parse("host").apply(&mut t);
+        assert!(t.settings.b("AgentFwd", false) && t.settings.b("NoPTY", false), "no flag keeps the saved setting");
+        let mut t = saved();
+        parse("-a -A host").apply(&mut t);
+        assert!(t.settings.b("AgentFwd", false), "the last flag wins");
     }
 
     #[test]

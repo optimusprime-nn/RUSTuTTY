@@ -15,7 +15,7 @@ async fn main() -> anyhow::Result<()> {
     if !command.is_empty() {
         target.settings.set("RemoteCommand", Value::Str(command.join(" ")));
         // like ssh, a command has no terminal unless -t asks for one
-        target.settings.set("NoPTY", Value::Int(1));
+        target.settings.set("NoPTY", Value::Int((args.no_pty != Some(false)) as u32));
     }
     let why = run_console(target).await?;
     eprintln!("{why}");

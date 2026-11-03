@@ -21,9 +21,9 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
-          tool: cargo-audit
+          tool: cargo-audit@0.22.2
       - name: Check dependencies for advisories
-        run: cargo audit --deny warnings
+        run: cargo audit --deny warnings --file Cargo.lock

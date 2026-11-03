@@ -7,7 +7,7 @@
 use anyhow::{anyhow, Context};
 use deck_core::config::Target;
 use deck_core::session::{clean, connect_exec, connect_sftp};
-use deck_tools::{host_keys, safe_local_name, scp, Args, RawConsole};
+use deck_tools::{host_keys, no_links_below, safe_local_name, scp, Args, RawConsole};
 use russh_sftp::client::SftpSession;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -63,9 +63,11 @@ fn put_tree<'a>(sftp: &'a SftpSession, from: &'a Path, to: String, recurse: bool
     })
 }
 
-fn get_tree<'a>(sftp: &'a SftpSession, from: String, to: PathBuf, recurse: bool, depth: usize) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>> {
+/// Downloads `from` to `to`, which is inside `root`, the destination given.
+fn get_tree<'a>(sftp: &'a SftpSession, root: &'a Path, from: String, to: PathBuf, recurse: bool, depth: usize) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>> {
     Box::pin(async move {
         let shown = clean(&from);
+        no_links_below(root, &to)?;
         let meta = sftp.metadata(&from).await.with_context(|| format!("looking up {shown}"))?;
         if !meta.is_dir() {
             let mut file = sftp.open(&from).await.with_context(|| format!("reading {shown}"))?;
@@ -84,7 +86,7 @@ fn get_tree<'a>(sftp: &'a SftpSession, from: String, to: PathBuf, recurse: bool,
             if !safe_local_name(&name) {
                 continue;
             }
-            get_tree(sftp, join(&from, &name), to.join(&name), recurse, depth + 1).await?;
+            get_tree(sftp, root, join(&from, &name), to.join(&name), recurse, depth + 1).await?;
         }
         Ok(())
     })
@@ -161,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
         for source in &args.rest {
             let (_, path) = remote(source).ok_or_else(|| anyhow!("{source} isn't remote"))?;
             let to = if dest.is_dir() { dest.join(leaf(path)) } else { dest.to_path_buf() };
-            get_tree(&sftp.session, path.to_string(), to, recurse, 0).await?;
+            get_tree(&sftp.session, dest, path.to_string(), to, recurse, 0).await?;
         }
     }
     Ok(())

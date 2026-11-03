@@ -9,9 +9,90 @@ use russh::{cipher, kex, Preferred, Pty};
 use std::borrow::Cow;
 use std::time::Duration;
 
-const CIPHERS: &str = "aes,chacha20,aesgcm,3des,WARN";
-const KEXES: &str = "mlkem-curve25519,ecdh,dh-gex-sha1,dh-group18-sha512,dh-group17-sha512,dh-group16-sha512,dh-group15-sha512,dh-group14-sha1,WARN";
-const HOST_KEYS: &str = "ed25519,ecdsa,rsa,WARN";
+/// What an unset list means here. The settings window shows these too.
+pub const DEFAULT_CIPHERS: &str = "aes,chacha20,aesgcm,3des,WARN";
+pub const DEFAULT_KEXES: &str = "mlkem-curve25519,ecdh,dh-gex-sha1,dh-group18-sha512,dh-group17-sha512,dh-group16-sha512,dh-group15-sha512,dh-group14-sha1,WARN";
+pub const DEFAULT_HOST_KEYS: &str = "ed25519,ecdsa,rsa,WARN";
+
+/// One entry of a preference list: its saved name, label, and where it goes
+/// if a session doesn't mention it (`keyvalwhere` in settings.c).
+pub struct Pref(pub &'static str, pub &'static str, pub Option<&'static str>, pub i32);
+
+pub const CIPHERS: &[Pref] = &[
+    Pref("aes", "AES (SSH-2 only)", None, -1),
+    Pref("chacha20", "ChaCha20 (SSH-2 only)", Some("aes"), 1),
+    Pref("aesgcm", "AES-GCM (SSH-2 only)", Some("chacha20"), 1),
+    Pref("3des", "3DES", None, -1),
+    Pref("WARN", "-- warn below here --", None, -1),
+    Pref("des", "DES", None, -1),
+    Pref("blowfish", "Blowfish", None, -1),
+    Pref("arcfour", "Arcfour (SSH-2 only)", None, -1),
+];
+
+pub const KEXES: &[Pref] = &[
+    Pref("ntru-curve25519", "NTRU Prime / Curve25519 hybrid kex", None, 1),
+    Pref("mlkem-curve25519", "ML-KEM / Curve25519 hybrid kex", Some("ntru-curve25519"), 1),
+    Pref("mlkem-nist", "ML-KEM / NIST ECDH hybrid kex", Some("mlkem-curve25519"), 1),
+    Pref("ecdh", "ECDH key exchange", None, 1),
+    Pref("dh-gex-sha1", "Diffie-Hellman group exchange", None, -1),
+    Pref("dh-group14-sha1", "Diffie-Hellman group 14 (2048-bit)", None, -1),
+    Pref("dh-group1-sha1", "Diffie-Hellman group 1 (1024-bit)", Some("WARN"), 1),
+    Pref("rsa", "RSA-based key exchange", Some("WARN"), -1),
+    Pref("dh-group15-sha512", "Diffie-Hellman group 15 (3072-bit)", Some("dh-group14-sha1"), -1),
+    Pref("dh-group16-sha512", "Diffie-Hellman group 16 (4096-bit)", Some("dh-group15-sha512"), -1),
+    Pref("dh-group17-sha512", "Diffie-Hellman group 17 (6144-bit)", Some("dh-group16-sha512"), 1),
+    Pref("dh-group18-sha512", "Diffie-Hellman group 18 (8192-bit)", Some("dh-group17-sha512"), 1),
+    Pref("WARN", "-- warn below here --", None, -1),
+];
+
+pub const HOST_KEYS: &[Pref] = &[
+    Pref("ed25519", "Ed25519", None, 1),
+    Pref("ed448", "Ed448", None, 1),
+    Pref("ecdsa", "ECDSA", None, -1),
+    Pref("dsa", "DSA", None, -1),
+    Pref("rsa", "RSA", None, -1),
+    Pref("WARN", "-- warn below here --", None, -1),
+];
+
+/// `gprefs_from_str`: the order from a saved list, with anything it leaves out
+/// put where the table says.
+pub fn prefs_order(text: &str, table: &'static [Pref]) -> Vec<usize> {
+    let at = |name: &str| table.iter().position(|p| p.0 == name);
+    let mut out: Vec<usize> = Vec::new();
+    for word in text.split(',') {
+        if let Some(i) = at(word) {
+            if !out.contains(&i) {
+                out.push(i);
+            }
+        }
+    }
+    while out.len() < table.len() {
+        for (i, p) in table.iter().enumerate() {
+            if out.contains(&i) {
+                continue;
+            }
+            let pos = match p.2 {
+                None if p.3 < 0 => out.len(),
+                None => 0,
+                Some(rel) => match out.iter().position(|&j| Some(j) == at(rel)) {
+                    Some(j) if p.3 < 0 => j,
+                    Some(j) => j + 1,
+                    None => continue,
+                },
+            };
+            out.insert(pos, i);
+        }
+    }
+    out
+}
+
+/// A saved list as PuTTY reads it: anything a session saved before PuTTY
+/// knew of it goes where the table says, so an older session still gets newer
+/// algorithms, and the settings window and the connection agree.
+fn filled(s: &Settings, key: &str, default: &str, table: &'static [Pref]) -> String {
+    let order = prefs_order(&s.s(key, default), table);
+    order.iter().map(|&i| table[i].0).collect::<Vec<_>>().join(",")
+}
 
 /// russh needs these in the key exchange list, as they turn on extensions.
 const KEX_EXTENSIONS: [kex::Name; 1] = [kex::EXTENSION_SUPPORT_AS_CLIENT];
@@ -74,27 +155,25 @@ fn host_keys(list: &str) -> Vec<Algorithm> {
 /// The negotiation lists for a session. `known` says whether a host key of an
 /// algorithm is already trusted: those go first (`PreferKnownHostKeys`), so a
 /// host isn't reported as unknown for offering a newer key type first.
-pub fn preferred(s: &Settings, known: impl Fn(&Algorithm) -> bool) -> Preferred {
-    let mut p = Preferred::DEFAULT;
-    let cipher = ciphers(&s.s("Cipher", CIPHERS));
-    if !cipher.is_empty() {
-        p.cipher = Cow::Owned(cipher);
-    }
-    let mut kex = kexes(&s.s("KEX", KEXES));
-    if !kex.is_empty() {
-        kex.extend(KEX_EXTENSIONS);
-        kex.push(kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT);
-        p.kex = Cow::Owned(kex);
-    }
-    let mut keys = host_keys(&s.s("HostKey", HOST_KEYS));
-    if keys.is_empty() {
-        keys = p.key.to_vec();
-    }
+///
+/// A list with nothing usable above `WARN` is refused rather than replaced
+/// with russh's defaults, which would use algorithms the settings left out.
+pub fn preferred(s: &Settings, known: impl Fn(&Algorithm) -> bool) -> anyhow::Result<Preferred> {
+    let none = |what: &str, page: &str| {
+        anyhow::anyhow!("This session allows no {what} RUSTuTTY can use: move one above \"warn below here\" in Connection > SSH > {page}.")
+    };
+    let cipher = ciphers(&filled(s, "Cipher", DEFAULT_CIPHERS, CIPHERS));
+    anyhow::ensure!(!cipher.is_empty(), none("cipher", "Cipher"));
+    let mut kex = kexes(&filled(s, "KEX", DEFAULT_KEXES, KEXES));
+    anyhow::ensure!(!kex.is_empty(), none("key exchange", "Kex"));
+    kex.extend(KEX_EXTENSIONS);
+    kex.push(kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT);
+    let mut keys = host_keys(&filled(s, "HostKey", DEFAULT_HOST_KEYS, HOST_KEYS));
+    anyhow::ensure!(!keys.is_empty(), none("host key type", "Host keys"));
     if s.b("PreferKnownHostKeys", true) {
         keys.sort_by_key(|k| !known(k));
     }
-    p.key = Cow::Owned(keys);
-    p
+    Ok(Preferred { cipher: Cow::Owned(cipher), kex: Cow::Owned(kex), key: Cow::Owned(keys), ..Preferred::DEFAULT })
 }
 
 /// `RekeyBytes`: a number with an optional K, M or G. `0` means never, but
@@ -206,33 +285,60 @@ mod tests {
 
     #[test]
     fn order_is_kept_and_nothing_below_warn_is_offered() {
-        let p = preferred(&with("Cipher", "chacha20,aes,WARN,3des,arcfour"), |_| false);
+        let p = preferred(&with("Cipher", "chacha20,aes,WARN,3des,arcfour"), |_| false).unwrap();
+        // AES-GCM isn't named, so it goes after ChaCha20, as in PuTTY
         assert_eq!(p.cipher[0], cipher::CHACHA20_POLY1305);
-        assert_eq!(p.cipher[1], cipher::AES_256_CTR);
+        assert_eq!(p.cipher[1], cipher::AES_256_GCM);
+        assert!(p.cipher.contains(&cipher::AES_256_CTR));
         assert!(!p.cipher.contains(&cipher::TRIPLE_DES_CBC));
     }
 
     #[test]
-    fn an_unusable_list_falls_back_to_safe_defaults() {
-        let p = preferred(&with("Cipher", "blowfish,WARN"), |_| false);
-        assert_eq!(p.cipher, Preferred::DEFAULT.cipher);
+    fn a_list_with_nothing_usable_is_refused_not_replaced() {
+        // everything below WARN, or only what russh can't do above it
+        for (key, table) in [("Cipher", CIPHERS), ("KEX", KEXES), ("HostKey", HOST_KEYS)] {
+            let all_below = std::iter::once("WARN").chain(table.iter().map(|p| p.0).filter(|n| *n != "WARN")).collect::<Vec<_>>().join(",");
+            let e = preferred(&with(key, &all_below), |_| false).unwrap_err();
+            assert!(e.to_string().contains("warn below here"), "{key}={all_below}: {e}");
+        }
+        let e = preferred(&with("Cipher", "blowfish,WARN"), |_| false).unwrap_err();
+        assert!(e.to_string().contains("Connection > SSH > Cipher"), "{e}");
+        // no saved list, or an empty one, is PuTTY's default, which is fine
+        preferred(&Settings::default(), |_| false).unwrap();
+        preferred(&with("Cipher", ""), |_| false).unwrap();
+    }
+
+    #[test]
+    fn an_older_list_gets_newer_algorithms_as_putty_does() {
+        // saved before PuTTY had ChaCha20 or AES-GCM: both go after AES, above WARN
+        let p = preferred(&with("Cipher", "aes,3des,WARN,des"), |_| false).unwrap();
+        assert!(p.cipher.contains(&cipher::CHACHA20_POLY1305));
+        assert!(p.cipher.contains(&cipher::AES_256_GCM));
+        let at = |c: cipher::Name| p.cipher.iter().position(|x| *x == c).unwrap();
+        assert!(at(cipher::AES_256_GCM) < at(cipher::TRIPLE_DES_CBC));
+        // ECDH and the hybrids go to the top of a key exchange list that lacks them
+        let p = preferred(&with("KEX", "dh-gex-sha1,WARN"), |_| false).unwrap();
+        assert_eq!(p.kex[0], kex::CURVE25519);
+        assert!(p.kex.contains(&kex::MLKEM768X25519_SHA256));
     }
 
     #[test]
     fn a_kex_list_keeps_the_strict_kex_extension() {
-        let p = preferred(&with("KEX", "ecdh,WARN,dh-group1-sha1"), |_| false);
-        assert_eq!(p.kex[0], kex::CURVE25519);
+        let p = preferred(&with("KEX", "ecdh,WARN,dh-group1-sha1"), |_| false).unwrap();
+        // the hybrids aren't named, so PuTTY puts them first
+        assert_eq!(p.kex[0], kex::MLKEM768X25519_SHA256);
+        assert!(p.kex.contains(&kex::CURVE25519));
         assert!(p.kex.contains(&kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT));
         assert!(!p.kex.contains(&kex::DH_G1_SHA1));
     }
 
     #[test]
     fn known_host_key_types_go_first() {
-        let p = preferred(&Settings::default(), |k| matches!(k, Algorithm::Rsa { .. }));
+        let p = preferred(&Settings::default(), |k| matches!(k, Algorithm::Rsa { .. })).unwrap();
         assert!(matches!(p.key[0], Algorithm::Rsa { .. }));
         let mut s = Settings::default();
         s.set("PreferKnownHostKeys", Value::Int(0));
-        let p = preferred(&s, |k| matches!(k, Algorithm::Rsa { .. }));
+        let p = preferred(&s, |k| matches!(k, Algorithm::Rsa { .. })).unwrap();
         assert_eq!(p.key[0], Algorithm::Ed25519);
     }
 

@@ -56,7 +56,7 @@ pub const OPTIONS: &[Option_] = &[
     o("Session", "Protocol (ssh, telnet, rlogin, raw, supdup, serial)", "Protocol", Kind::Text),
     o("Session", "Close window on exit", "CloseOnExit", Kind::Choice(1, CLOSE)),
     o("Session", "Warn before closing", "WarnOnClose", Kind::Flag(true)),
-    o("Session", "Warn before pasting several lines", "PasteWarnLines", Kind::Flag(true)),
+    o("Session", "Warn before pasting line ends", "PasteWarnLines", Kind::Flag(true)),
     o("Logging", "What to log", "LogType", Kind::Choice(0, LOG)),
     o("Logging", "Log file (&H host, &P port, &Y&M&D date, &T time)", "LogFileName", Kind::Text),
     o("Logging", "If the file exists", "LogFileClash", Kind::Choice(0, CLASH)),

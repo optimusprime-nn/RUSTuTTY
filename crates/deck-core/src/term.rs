@@ -527,9 +527,11 @@ impl Terminal {
     }
 
     /// Whether pasted line ends would run as commands, not go in as one paste.
+    /// A single line end counts: one at the end of a line copied from a page
+    /// runs it before it can be read.
     pub fn paste_runs_lines(&self, text: &str) -> bool {
         let bracketed = self.bracketed_paste && self.term.mode().contains(TermMode::BRACKETED_PASTE);
-        !bracketed && text.trim_end().contains(['\r', '\n'])
+        !bracketed && text.contains(['\r', '\n'])
     }
 
     /// The session is over, so nothing more goes to a printer.
@@ -684,6 +686,20 @@ mod tests {
         t.feed(b"\x1b[?2004h");
         let got = t.paste_bytes("x\x1b[201~rm -rf /\n");
         assert_eq!(got, b"\x1b[200~x[201~rm -rf /\r\x1b[201~".to_vec());
+    }
+
+    #[test]
+    fn any_line_end_that_would_run_asks_first() {
+        let mut t = Terminal::new(20, 5);
+        for runs in ["echo hi\n", "echo hi\r", "echo hi\r\n", "echo hi\n\n\n", "a\nb", "\n"] {
+            assert!(t.paste_runs_lines(runs), "{runs:?}");
+        }
+        for stays in ["echo hi", "echo hi  \t", ""] {
+            assert!(!t.paste_runs_lines(stays), "{stays:?}");
+        }
+        // in bracketed paste the line ends go in as text, so there's nothing to ask
+        t.feed(b"\x1b[?2004h");
+        assert!(!t.paste_runs_lines("echo hi\n"));
     }
 
     #[test]

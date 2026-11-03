@@ -128,8 +128,9 @@ the server's urgent request.
 
 Some things differ on purpose, for safety:
 
-- Pasting several lines asks first, unless the program is using bracketed paste.
-  `PasteWarnLines` turns this off
+- Pasting anything with a line end asks first, even one at the end of a single
+  line, unless the program is using bracketed paste. `PasteWarnLines` turns
+  this off
 - An HTTP proxy only gets a password if it offers Basic or Digest, and Basic
   shows a warning
 - `pscp -scp` refuses files other than the one asked for. Wildcards need `-unsafe`
@@ -144,7 +145,8 @@ Some things differ on purpose, for safety:
 And some differ for other reasons:
 
 - Algorithms PuTTY lists below "warn" aren't offered at all, because russh has
-  nowhere to stop and ask
+  nowhere to stop and ask. A session left with none it can use is refused,
+  with a message saying which list to change
 - `Ctrl+Shift+C` and `V` always work, whatever `CtrlShiftCV` says
 - Connection sharing works between sessions in one program. It can't join a
   connection held by a separate PuTTY, and forwardings on a joining session

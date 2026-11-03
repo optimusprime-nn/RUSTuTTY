@@ -18,7 +18,7 @@ jobs:
       DECK_EXE: ${{ github.workspace }}\target\release\rustutty.exe
       DECK_TOOLS: ${{ github.workspace }}\target\release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Find the version
         id: version
         shell: pwsh
@@ -29,15 +29,15 @@ jobs:
           }
           "version=$version" >> $env:GITHUB_OUTPUT
       - name: Core and tools
-        run: cargo test -p deck-core -p deck-tools --no-fail-fast
+        run: cargo test --locked -p deck-core -p deck-tools --no-fail-fast
       - name: Window
-        run: cargo test -p rustutty --features test-hooks
+        run: cargo test --locked -p rustutty --features test-hooks
       - name: Add third-party licences
         run: python scripts/notices.py
       - name: Build the programs
-        run: cargo build --release -p rustutty -p deck-tools
+        run: cargo build --locked --release -p rustutty -p deck-tools
       - name: Build the installer
-        run: cargo build --release -p deck-setup
+        run: cargo build --locked --release -p deck-setup
       - name: Package
         shell: pwsh
         run: |
@@ -52,7 +52,7 @@ jobs:
           Push-Location out
           Get-ChildItem | ForEach-Object { "$((Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content -Encoding ascii SHA256SUMS.txt
           Pop-Location
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release
           path: out

@@ -36,8 +36,9 @@ The tools differ too:
 
 ## Different on purpose, for safety
 
-- Pasting several lines asks first, unless the program is using bracketed
-  paste. **PasteWarnLines** turns this off.
+- Pasting anything with a line end asks first, even a single line copied with
+  its newline, unless the program is using bracketed paste. **Warn before
+  pasting line ends** under Window > Behaviour turns this off.
 - An HTTP proxy only gets a password if it offers Basic or Digest login, and
   Basic shows a warning, because it sends the password readably.
 - `pscp -scp` refuses files other than the one asked for. Wildcards need
@@ -55,7 +56,9 @@ The tools differ too:
 ## Different for other reasons
 
 - Algorithms PuTTY lists below "warn below here" aren't offered at all, because
-  russh has nowhere to stop and ask.
+  russh has nowhere to stop and ask. If that leaves a session no cipher, key
+  exchange or host key type RUSTuTTY can use, it isn't connected, and the
+  message says which list to change.
 - `Ctrl+Shift+C` and `Ctrl+Shift+V` always work, whatever **CtrlShiftCV** says.
 - Connection sharing works between sessions in one RUSTuTTY. It can't join a
   connection held by a separate PuTTY, and forwardings on a joining session

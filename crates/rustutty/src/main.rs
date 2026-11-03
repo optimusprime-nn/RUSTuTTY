@@ -197,10 +197,11 @@ fn paste_preview(text: &str) -> String {
     const SHOWN: usize = 400;
     let (chars, lines) = (text.chars().count(), text.trim_end().lines().count());
     let start: String = text.chars().take(SHOWN).filter(|&c| !c.is_control() || c == '\n').collect();
+    let total = if lines == 1 { "1 line".to_string() } else { format!("{lines} lines") };
     if chars > SHOWN {
-        format!("{start}\n\n... and {} more characters. {lines} lines in all.", chars - SHOWN)
+        format!("{start}\n\n... and {} more characters. {total} in all.", chars - SHOWN)
     } else {
-        format!("{start}\n\n{lines} lines in all.")
+        format!("{start}\n\n{total} in all.")
     }
 }
 
@@ -1083,7 +1084,7 @@ impl Deck {
         let Some(s) = self.active.and_then(|i| self.sessions.get(i)) else { return true };
         !s.target.settings.b("PasteWarnLines", true)
             || !s.term.paste_runs_lines(text)
-            || self.confirm(&format!("Paste these lines? Each one may run as a command.\n\n{}", paste_preview(text)))
+            || self.confirm(&format!("Paste this? Each line end will press Enter, so it may run as a command.\n\n{}", paste_preview(text)))
     }
 
     fn confirm(&self, text: &str) -> bool {

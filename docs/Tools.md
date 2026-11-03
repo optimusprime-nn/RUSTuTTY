@@ -27,9 +27,9 @@ Plink, PSCP and PSFTP all take these:
 | `-load "name"` | Use a saved session's settings |
 | `-L`, `-R`, `-D` | Port forwarding, as on the [command line](Command-Line.md) |
 | `-N` | Don't start a shell or command: just forward ports |
-| `-T` / `-t` | Don't / do ask for a terminal |
+| `-T` / `-t` | Don't / do ask for a terminal, whatever a saved session says |
 | `-C` | Compress the connection |
-| `-A` / `-a` | Allow / don't allow agent forwarding |
+| `-A` / `-a` | Allow / don't allow agent forwarding, whatever a saved session says |
 | `-batch` | Never ask a question: fail instead, for scripts |
 
 There's no `-pw`: a password on a command line can be read by other programs.
@@ -63,6 +63,10 @@ a Windows drive, so `C:\file` is always local.
 | `-unsafe` | Allow a server to send files other than the ones named, for wildcards over SCP |
 
 PSCP uses SFTP, and falls back to SCP if the server has no SFTP.
+
+Downloads never go through a link or junction inside the destination, since
+the server chooses the names there. A name that leads to one stops the copy.
+The destination you give may itself be a link.
 
     pscp report.pdf user@server:/srv/reports/
     pscp -r user@server:/var/log/app C:\logs

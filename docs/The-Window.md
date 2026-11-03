@@ -41,9 +41,11 @@ expect. In full-screen programs such as `vim`, `Ctrl+V` goes to the program, and
 `Ctrl+Shift+V` always pastes. When a program uses the mouse, hold **Shift** to
 select text.
 
-Pasting several lines asks first, so a stray paste can't run a list of commands.
-Programs that use bracketed paste are trusted to handle it themselves. The
-**PasteWarnLines** setting turns the question off.
+Pasting anything with a line end asks first, because each line end presses
+Enter. That includes a single command copied with its newline, which would
+otherwise run before you could read it. Programs that use bracketed paste are
+trusted to handle it themselves. **Warn before pasting line ends** under
+Window > Behaviour turns the question off.
 
 ## Keyboard shortcuts
 

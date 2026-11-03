@@ -3,6 +3,8 @@
 //! order, using the same insertion rules for control sets. Each control says
 //! which saved keyword it edits.
 
+use deck_core::algorithms::{DEFAULT_CIPHERS, DEFAULT_HOST_KEYS, DEFAULT_KEXES};
+pub use deck_core::algorithms::{prefs_order, Pref, CIPHERS, HOST_KEYS, KEXES};
 use deck_core::options::{Kind as OptionKind, OPTIONS};
 
 pub const NONE: char = '\0';
@@ -480,7 +482,7 @@ pub fn build(mid: bool, protocol: &str, user: &str) -> Cbox {
     b.check(s, "Ensure window is always on top", 'e', flag("AlwaysOnTop", false));
     b.check(s, "Full screen on Alt-Enter", 'f', flag("FullScreenOnAltEnter", false));
     // RUSTuTTY's own
-    b.check(s, "Warn before pasting several lines", 'p', flag("PasteWarnLines", true));
+    b.check(s, "Warn before pasting line ends", 'p', flag("PasteWarnLines", true));
     b.check(s, "Resize the window to fit a new session", 'r', flag("FitWindow", false));
     b.check(s, "Save window size on exit", 'z', Bind::SaveSize);
 
@@ -829,57 +831,11 @@ pub fn build(mid: bool, protocol: &str, user: &str) -> Cbox {
     cb
 }
 
-/// One entry of a preference list: its saved name, label, and where it goes
-/// if a session doesn't mention it (`keyvalwhere` in settings.c).
-pub struct Pref(pub &'static str, pub &'static str, pub Option<&'static str>, pub i32);
-
-pub const CIPHERS: &[Pref] = &[
-    Pref("aes", "AES (SSH-2 only)", None, -1),
-    Pref("chacha20", "ChaCha20 (SSH-2 only)", Some("aes"), 1),
-    Pref("aesgcm", "AES-GCM (SSH-2 only)", Some("chacha20"), 1),
-    Pref("3des", "3DES", None, -1),
-    Pref("WARN", "-- warn below here --", None, -1),
-    Pref("des", "DES", None, -1),
-    Pref("blowfish", "Blowfish", None, -1),
-    Pref("arcfour", "Arcfour (SSH-2 only)", None, -1),
-];
-
-pub const KEXES: &[Pref] = &[
-    Pref("ntru-curve25519", "NTRU Prime / Curve25519 hybrid kex", None, 1),
-    Pref("mlkem-curve25519", "ML-KEM / Curve25519 hybrid kex", Some("ntru-curve25519"), 1),
-    Pref("mlkem-nist", "ML-KEM / NIST ECDH hybrid kex", Some("mlkem-curve25519"), 1),
-    Pref("ecdh", "ECDH key exchange", None, 1),
-    Pref("dh-gex-sha1", "Diffie-Hellman group exchange", None, -1),
-    Pref("dh-group14-sha1", "Diffie-Hellman group 14 (2048-bit)", None, -1),
-    Pref("dh-group1-sha1", "Diffie-Hellman group 1 (1024-bit)", Some("WARN"), 1),
-    Pref("rsa", "RSA-based key exchange", Some("WARN"), -1),
-    Pref("dh-group15-sha512", "Diffie-Hellman group 15 (3072-bit)", Some("dh-group14-sha1"), -1),
-    Pref("dh-group16-sha512", "Diffie-Hellman group 16 (4096-bit)", Some("dh-group15-sha512"), -1),
-    Pref("dh-group17-sha512", "Diffie-Hellman group 17 (6144-bit)", Some("dh-group16-sha512"), 1),
-    Pref("dh-group18-sha512", "Diffie-Hellman group 18 (8192-bit)", Some("dh-group17-sha512"), 1),
-    Pref("WARN", "-- warn below here --", None, -1),
-];
-
-pub const HOST_KEYS: &[Pref] = &[
-    Pref("ed25519", "Ed25519", None, 1),
-    Pref("ed448", "Ed448", None, 1),
-    Pref("ecdsa", "ECDSA", None, -1),
-    Pref("dsa", "DSA", None, -1),
-    Pref("rsa", "RSA", None, -1),
-    Pref("WARN", "-- warn below here --", None, -1),
-];
-
 pub const GSS_LIBS: &[Pref] = &[
     Pref("gssapi32", "MIT Kerberos GSSAPI64.DLL", None, -1),
     Pref("sspi", "Microsoft SSPI SECUR32.DLL", None, -1),
     Pref("custom", "User-specified GSSAPI DLL", None, -1),
 ];
-
-/// What the deck uses for an unset list, so the box shows what really happens
-/// (algorithms.rs), and PuTTY's own defaults elsewhere.
-const DEFAULT_CIPHERS: &str = "aes,chacha20,aesgcm,3des,WARN";
-const DEFAULT_KEXES: &str = "mlkem-curve25519,ecdh,dh-gex-sha1,dh-group18-sha512,dh-group17-sha512,dh-group16-sha512,dh-group15-sha512,dh-group14-sha1,WARN";
-const DEFAULT_HOST_KEYS: &str = "ed25519,ecdsa,rsa,WARN";
 
 impl Prefs {
     pub fn info(self) -> (&'static str, &'static str, &'static [Pref]) {
@@ -890,38 +846,6 @@ impl Prefs {
             Prefs::Gss => ("GSSLibs", "", GSS_LIBS),
         }
     }
-}
-
-/// `gprefs_from_str`: the order from a saved list, with anything it leaves out
-/// put where the table says.
-pub fn prefs_order(text: &str, table: &'static [Pref]) -> Vec<usize> {
-    let at = |name: &str| table.iter().position(|p| p.0 == name);
-    let mut out: Vec<usize> = Vec::new();
-    for word in text.split(',') {
-        if let Some(i) = at(word) {
-            if !out.contains(&i) {
-                out.push(i);
-            }
-        }
-    }
-    while out.len() < table.len() {
-        for (i, p) in table.iter().enumerate() {
-            if out.contains(&i) {
-                continue;
-            }
-            let pos = match p.2 {
-                None if p.3 < 0 => out.len(),
-                None => 0,
-                Some(rel) => match out.iter().position(|&j| Some(j) == at(rel)) {
-                    Some(j) if p.3 < 0 => j,
-                    Some(j) => j + 1,
-                    None => continue,
-                },
-            };
-            out.insert(pos, i);
-        }
-    }
-    out
 }
 
 pub const TTY_MODES: &[&str] = &[

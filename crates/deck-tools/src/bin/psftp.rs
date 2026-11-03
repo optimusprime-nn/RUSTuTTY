@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     let sftp = connect_sftp(target, host_keys()).await?;
     drop(raw);
     let cwd = sftp.session.canonicalize(".").await?;
-    println!("Remote working directory is {cwd}");
+    println!("Remote working directory is {}", clean(&cwd));
     let mut shell = Shell { sftp, cwd };
 
     if let Some(file) = batch {
@@ -158,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
         match shell.run(line.trim()).await {
             Ok(true) => {}
             Ok(false) => return Ok(()),
-            Err(e) => eprintln!("{e:#}"),
+            Err(e) => eprintln!("{}", clean(&format!("{e:#}"))),
         }
     }
 }

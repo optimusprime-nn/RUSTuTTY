@@ -557,20 +557,20 @@ async fn authenticate(handle: &mut Handle<Client>, io: &Arc<Mutex<Io>>, target: 
     anyhow::bail!("Too many failed logins.")
 }
 
-fn client_config(s: &Settings, store: &dyn HostKeyStore, host: &str, port: u16) -> client::Config {
+fn client_config(s: &Settings, store: &dyn HostKeyStore, host: &str, port: u16) -> anyhow::Result<client::Config> {
     let ping = s.ping_seconds();
     let bytes = algorithms::rekey_bytes(s);
     let mut config = client::Config {
         keepalive_interval: (ping > 0).then(|| Duration::from_secs(ping as u64)),
         nodelay: s.b("TCPNoDelay", true),
         limits: russh::Limits::new(bytes, bytes, algorithms::rekey_time(s)),
-        preferred: algorithms::preferred(s, |a| hostkeys::known(store, host, port, a)),
+        preferred: algorithms::preferred(s, |a| hostkeys::known(store, host, port, a))?,
         ..Default::default()
     };
     if !s.b("Compression", false) {
         config.preferred.compression = Cow::Borrowed(&[compression::NONE]);
     }
-    config
+    Ok(config)
 }
 
 /// `LogHost`, which can be `host`, `host:port`, `[v6]:port` or a bare IPv6 address.
@@ -595,7 +595,7 @@ async fn login(target: &Target, store: Arc<dyn HostKeyStore>, io: Arc<Mutex<Io>>
     let events = io.lock().await.events.clone();
     let logical = s.s("LogHost", "");
     let (key_host, key_port) = if logical.is_empty() { (target.host.clone(), target.port) } else { log_host(&logical, target.port) };
-    let config = Arc::new(client_config(s, store.as_ref(), &key_host, key_port));
+    let config = Arc::new(client_config(s, store.as_ref(), &key_host, key_port)?);
     let remote_forwards = s
         .forwards()
         .into_iter()
@@ -717,21 +717,33 @@ fn listen_address(bind: Option<String>, accept_all: bool) -> String {
     bind.unwrap_or_else(|| if accept_all { "0.0.0.0" } else { "127.0.0.1" }.to_string())
 }
 
+/// The longest SOCKS 4 user name or host name read: a host name has at most
+/// 255 bytes, as in SOCKS 5, and anything longer is refused, not stored.
+const SOCKS_FIELD: usize = 255;
+/// How long a SOCKS client gets to say where it's going.
+const SOCKS_WAIT: Duration = Duration::from_secs(10);
+
 async fn zero_terminated(c: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::new();
     loop {
         match c.read_u8().await? {
             0 => return Ok(out),
+            _ if out.len() == SOCKS_FIELD => anyhow::bail!("SOCKS field too long"),
             b => out.push(b),
         }
     }
 }
 
-/// What a SOCKS client wants to reach, and whether it spoke version 5.
-async fn socks_destination(c: &mut TcpStream) -> anyhow::Result<(String, u16, bool)> {
+/// What a SOCKS client wants to reach, and whether it spoke version 5. A
+/// client that takes too long is dropped, so a stalled one holds nothing.
+async fn socks_destination(c: &mut TcpStream, wait: Duration) -> anyhow::Result<(String, u16, bool)> {
+    tokio::time::timeout(wait, socks_request(c)).await.map_err(|_| anyhow::anyhow!("SOCKS client too slow"))?
+}
+
+async fn socks_request(c: &mut TcpStream) -> anyhow::Result<(String, u16, bool)> {
     match c.read_u8().await? {
         4 => {
-            let _command = c.read_u8().await?;
+            anyhow::ensure!(c.read_u8().await? == 1, "only SOCKS connect is supported");
             let port = c.read_u16().await?;
             let mut ip = [0u8; 4];
             c.read_exact(&mut ip).await?;
@@ -780,7 +792,7 @@ async fn serve_local(handle: Arc<Handle<Client>>, listener: TcpListener, dest: O
         tokio::spawn(async move {
             let (host, port, socks) = match dest {
                 Some((h, p)) => (h, p, None),
-                None => match socks_destination(&mut tcp).await {
+                None => match socks_destination(&mut tcp, SOCKS_WAIT).await {
                     Ok((h, p, five)) => (h, p, Some(five)),
                     Err(_) => return,
                 },
@@ -955,4 +967,57 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
         handle.disconnect(russh::Disconnect::ByApplication, "", "en").await.ok();
     }
     Ok(reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A SOCKS client on one end of a local connection, and the parser on the other.
+    async fn ask(request: Vec<u8>) -> anyhow::Result<(String, u16, bool)> {
+        ask_within(request, SOCKS_WAIT).await
+    }
+
+    async fn ask_within(request: Vec<u8>, wait: Duration) -> anyhow::Result<(String, u16, bool)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut c = TcpStream::connect(addr).await.unwrap();
+            let _ = c.write_all(&request).await;
+            // keep the connection open until the parser is done with it
+            let _ = c.read_u8().await;
+        });
+        let (mut server, _) = listener.accept().await.unwrap();
+        let got = socks_destination(&mut server, wait).await;
+        drop(server);
+        client.await.unwrap();
+        got
+    }
+
+    #[tokio::test]
+    async fn socks4a_names_are_read() {
+        let mut req = vec![4, 1, 0, 80, 0, 0, 0, 1];
+        req.extend(b"user\0example.test\0");
+        assert_eq!(ask(req).await.unwrap(), ("example.test".to_string(), 80, false));
+    }
+
+    #[tokio::test]
+    async fn socks4_fields_are_bounded() {
+        let mut req = vec![4, 1, 0, 80, 0, 0, 0, 1];
+        req.extend(vec![b'u'; 64 * 1024]);
+        let e = ask(req).await.unwrap_err();
+        assert!(e.to_string().contains("too long"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn socks4_only_connects() {
+        let e = ask(vec![4, 2, 0, 80, 127, 0, 0, 1, 0]).await.unwrap_err();
+        assert!(e.to_string().contains("connect"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_socks_client_is_dropped() {
+        let e = ask_within(vec![4, 1, 0, 80], Duration::from_millis(200)).await.unwrap_err();
+        assert!(e.to_string().contains("too slow"), "{e}");
+    }
 }

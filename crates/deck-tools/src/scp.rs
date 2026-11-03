@@ -1,7 +1,7 @@
 //! The old SCP protocol, for servers with no SFTP. It's a conversation with
 //! `scp -t` (receive) or `scp -f` (send) running on the server.
 
-use crate::safe_local_name;
+use crate::{no_links_below, safe_local_name};
 use anyhow::{anyhow, bail, Context};
 use deck_core::session::clean;
 use std::future::Future;
@@ -126,6 +126,7 @@ pub async fn download<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, to: &Path, r
                 received |= dirs.is_empty();
                 let here = dirs.last().cloned().unwrap_or_else(|| to.to_path_buf());
                 let target = if !dirs.is_empty() || here.is_dir() { here.join(&name) } else { here };
+                no_links_below(to, &target)?;
                 if kind == b'D' {
                     anyhow::ensure!(recurse, "the server sent a folder without -r");
                     std::fs::create_dir_all(&target)?;
@@ -230,6 +231,51 @@ mod tests {
             assert!(e.to_string().contains("unsafe"), "{evil}: {e}");
             std::fs::remove_dir_all(dir).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn a_server_cannot_write_through_a_junction() {
+        // destination\requested\link leads to outside, a folder beside it
+        let dir = temp("junction");
+        let (dest, outside) = (dir.join("destination"), dir.join("outside"));
+        std::fs::create_dir_all(dest.join("requested")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(dest.join("requested").join("link")).arg(&outside).output().unwrap();
+        assert!(made.status.success(), "mklink: {}", String::from_utf8_lossy(&made.stdout));
+        let (mut near, mut far) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut ok = [0u8; 1];
+            far.read_exact(&mut ok).await.unwrap();
+            for step in [&b"D0755 0 requested\n"[..], b"D0755 0 link\n", b"C0644 5 marker.txt\n"] {
+                far.write_all(step).await.unwrap();
+                if far.read_exact(&mut ok).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let e = download(&mut near, &dest, true, Some("requested")).await.unwrap_err();
+        assert!(e.to_string().contains("junction"), "{e}");
+        drop(near);
+        server.await.unwrap();
+        assert!(!outside.join("marker.txt").exists());
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none(), "nothing may land outside");
+        // the junction goes first, so removing the tree doesn't follow it
+        std::fs::remove_dir(dest.join("requested").join("link")).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_destination_itself_may_be_a_link() {
+        let dir = temp("rootlink");
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.join("link");
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&real).output().unwrap();
+        assert!(made.status.success());
+        no_links_below(&link, &link.join("a").join("b")).unwrap();
+        assert!(no_links_below(&dir, &link.join("a")).is_err());
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

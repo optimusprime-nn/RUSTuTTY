@@ -30,7 +30,8 @@ change, don't: that's the warning doing its job.
 ## Pasting asks before it pastes
 
 That's the paste warning, which stops a stray paste from running commands.
-Untick **Warn before pasting several lines** under Window > Behaviour in
+It asks whenever the text has a line end, even just one at the end, since that
+presses Enter. Untick **Warn before pasting line ends** under Window > Behaviour in
 [Settings](Settings.md) if you'd rather it didn't.
 
 ## Ctrl+C or Ctrl+V doesn't do what I expect
