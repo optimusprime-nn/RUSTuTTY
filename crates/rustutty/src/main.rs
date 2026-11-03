@@ -759,11 +759,86 @@ impl Deck {
         self.select(self.sessions.len() - 1);
         // the first session sets the window's size only if it asks to
         if first && fit && sized && self.full_screen.is_none() && !cfg!(feature = "test-hooks") {
-            let side = self.px(SIDEBAR);
-            let mut r = RECT { left: 0, top: 0, right: side + tc as i32 * self.cell.0 + self.border() * 2, bottom: tr as i32 * self.cell.1 + self.border() * 2 };
-            unsafe {
-                let _ = AdjustWindowRectEx(&mut r, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE(0));
-                let _ = SetWindowPos(self.main, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
+            self.fit_window(tc, tr);
+        }
+    }
+
+    /// Sizes the window so the terminal has this many columns and rows.
+    /// The window changes by however much the text area is short or over,
+    /// so the sidebar, scrollbar and frame all count, whatever their size.
+    fn fit_window(&self, cols: u32, rows: u32) {
+        unsafe {
+            let (mut window, mut text) = (RECT::default(), RECT::default());
+            let _ = GetWindowRect(self.main, &mut window);
+            let _ = GetClientRect(self.content, &mut text);
+            let b = self.border() * 2;
+            let dw = cols as i32 * self.cell.0 + b - (text.right - text.left);
+            let dh = rows as i32 * self.cell.1 + b - (text.bottom - text.top);
+            let _ = SetWindowPos(self.main, None, 0, 0, window.right - window.left + dw, window.bottom - window.top + dh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    /// xterm's window operations, from the session that's showing, as PuTTY
+    /// does them. Resizing follows `NoRemoteResize` and a locked size, and
+    /// never undoes full screen or a maximised window.
+    fn window_op(&mut self, numbers: &[u32]) {
+        let n = |i: usize| numbers.get(i).copied().unwrap_or(0);
+        let Some(s) = self.current() else { return };
+        let settings = s.target.settings.clone();
+        let (cols, rows) = s.term.size();
+        let tx = s.tx.clone();
+        let reply = |text: String| {
+            let _ = tx.send(Command::Reply(text.into_bytes()));
+        };
+        let (cw, ch) = self.cell;
+        let main = self.main;
+        let zoomed = self.full_screen.is_some() || unsafe { IsZoomed(main).as_bool() };
+        let may_resize = !settings.b("NoRemoteResize", false) && settings.i("LockSize", 0) != 1 && !zoomed;
+        let resize = |c: u32, r: u32| {
+            if may_resize {
+                let c = if c == 0 { cols as u32 } else { c.min(1000) };
+                let r = if r == 0 { rows as u32 } else { r.min(1000) };
+                self.fit_window(c, r);
+            }
+        };
+        unsafe {
+            match n(0) {
+                1 => {
+                    let _ = ShowWindow(main, SW_RESTORE);
+                }
+                2 => {
+                    let _ = ShowWindow(main, SW_MINIMIZE);
+                }
+                3 => {
+                    let _ = SetWindowPos(main, None, n(1) as i32, n(2) as i32, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+                // a size in pixels, as whole cells
+                4 => resize(n(2) / cw.max(1) as u32, n(1) / ch.max(1) as u32),
+                5 => {
+                    let _ = SetWindowPos(main, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                }
+                6 => {
+                    let _ = SetWindowPos(main, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                }
+                7 => self.redraw(),
+                8 => resize(n(2), n(1)),
+                9 => {
+                    let _ = ShowWindow(main, if n(1) == 0 { SW_RESTORE } else { SW_MAXIMIZE });
+                }
+                11 => reply(format!("\x1b[{}t", if IsIconic(main).as_bool() { 2 } else { 1 })),
+                13 => {
+                    let mut r = RECT::default();
+                    let _ = GetWindowRect(main, &mut r);
+                    reply(format!("\x1b[3;{};{}t", r.left, r.top));
+                }
+                14 => reply(format!("\x1b[4;{};{}t", rows as i32 * ch, cols as i32 * cw)),
+                19 => {
+                    let (w, h) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+                    reply(format!("\x1b[9;{};{}t", h / ch.max(1), w / cw.max(1)));
+                }
+                // DECSLPP: this many rows
+                r if r >= 24 => resize(0, r),
+                _ => {}
             }
         }
     }
@@ -822,6 +897,7 @@ impl Deck {
         let mut finished = Vec::new();
         let mut bells = Vec::new();
         let mut flash = false;
+        let mut window_ops = Vec::new();
         let active_id = self.current().map(|s| s.id);
         for (id, event) in events {
             let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) else { continue };
@@ -887,6 +963,9 @@ impl Deck {
                     }
                     TermEvent::Flash if Some(id) == active_id => flash = true,
                     TermEvent::Flash => {}
+                    // only the session that's showing may act on the window
+                    TermEvent::WindowOp(numbers) if Some(id) == active_id => window_ops.push(numbers),
+                    TermEvent::WindowOp(_) => {}
                 }
             }
         }
@@ -898,6 +977,9 @@ impl Deck {
             unsafe {
                 SetTimer(Some(self.content), TIMER_FLASH, FLASH_MS, None);
             }
+        }
+        for numbers in window_ops {
+            self.window_op(&numbers);
         }
         for id in finished {
             if let Some(i) = self.sessions.iter().position(|s| s.id == id) {

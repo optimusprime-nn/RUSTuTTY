@@ -84,13 +84,17 @@ pub fn ctrl_parse(text: &str) -> Vec<u8> {
 #[derive(Debug, PartialEq)]
 pub enum Action {
     Reply(Vec<u8>),
-    ReportTitle,
+    /// The title, as `OSC l` (window) or `OSC L` (icon).
+    ReportTitle(u8),
     Print(Vec<u8>),
     PrintEnd,
     /// Mode 1015 on or off: mouse reports in urxvt's decimal form.
     UrxvtMouse(bool),
     /// DECSCNM, mode 5: the whole screen in reverse video, or back.
     ReverseVideo(bool),
+    /// An xterm window operation (`CSI … t`), its numbers as sent. DECCOLM's
+    /// switch to 132 or 80 columns comes as `[8, 0, columns]`.
+    WindowOp(Vec<u32>),
 }
 
 /// The end of a print job, which is looked for in everything that's printed.
@@ -110,6 +114,14 @@ enum State {
     Ground,
     Escape,
     Charset,
+    /// Just after `ESC ]`, where the Linux palette codes are told apart.
+    OscStart,
+    /// `ESC (` and the like, waiting for which set G0 to G3 becomes.
+    Designate(u8),
+    /// The first byte of a two-byte character, in the SCO set.
+    ScoLead(u8),
+    /// `ESC ] P` and the hex digits read so far.
+    LinuxPalette(Vec<u8>),
     Csi(Vec<u8>),
     /// A control sequence too long to keep, dropped to its end.
     CsiIgnore,
@@ -123,6 +135,46 @@ pub struct Filter {
     config: FilterConfig,
     state: State,
     printing: Option<Printing>,
+    charsets: Charsets,
+}
+
+/// The character sets the terminal library doesn't have, which are done
+/// here: the UK set (`ESC ( A`, where `#` is `£`) and SCO's (`ESC ( U`, code
+/// page 437), and SCO's SGR 11 and 12, which show control characters as
+/// pictures.
+#[derive(Default)]
+struct Charsets {
+    /// What G0 to G3 were last set to, by their final byte.
+    sets: [u8; 4],
+    /// Shift Out: G1 in use rather than G0.
+    shifted: bool,
+    /// SGR 10, 11 or 12: 0, 1 or 2.
+    sco_acs: u8,
+}
+
+impl Charsets {
+    fn active(&self) -> u8 {
+        self.sets[self.shifted as usize]
+    }
+}
+
+/// Code page 437's pictures for 0 to 31.
+const CP437_LOW: [char; 32] = [
+    ' ', '☺', '☻', '♥', '♦', '♣', '♠', '•', '◘', '○', '◙', '♂', '♀', '♪', '♫', '☼',
+    '►', '◄', '↕', '‼', '¶', '§', '▬', '↨', '↑', '↓', '→', '←', '∟', '↔', '▲', '▼',
+];
+
+/// Code page 437 from 128 to 255.
+const CP437_HIGH: &str = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■\u{a0}";
+
+/// A byte as code page 437 shows it.
+fn cp437(b: u8) -> char {
+    match b {
+        0..=31 => CP437_LOW[b as usize],
+        127 => '⌂',
+        128.. => CP437_HIGH.chars().nth(b as usize - 128).unwrap_or(' '),
+        _ => b as char,
+    }
 }
 
 /// The nearest entry in the 256-colour table's 6x6x6 cube.
@@ -133,7 +185,7 @@ fn nearest_256(r: u32, g: u32, b: u32) -> u32 {
 
 impl Filter {
     pub fn new(config: FilterConfig) -> Filter {
-        Filter { config, state: State::Ground, printing: None }
+        Filter { config, state: State::Ground, printing: None, charsets: Charsets::default() }
     }
 
     /// New settings, keeping the place in any sequence half read.
@@ -209,6 +261,12 @@ impl Filter {
                     }
                     // 2026 holds back the display, which would let a host freeze it
                     Ok(2026) => Becomes::Nothing,
+                    // DECCOLM: 132 columns or 80. The library clears the
+                    // screen, and the window changes size if it may.
+                    Ok(3) => {
+                        actions.push(Action::WindowOp(vec![8, 0, if on { 132 } else { 80 }]));
+                        return Becomes::Same(m);
+                    }
                     _ => return Becomes::Same(m),
                 };
                 changed = true;
@@ -235,7 +293,18 @@ impl Filter {
     }
 
     /// What to do with a whole CSI sequence. `None` leaves it as it came.
-    fn csi(&self, params: &[u8], last: u8, actions: &mut Vec<Action>) -> Option<Vec<u8>> {
+    fn csi(&mut self, params: &[u8], last: u8, actions: &mut Vec<Action>) -> Option<Vec<u8>> {
+        // SCO's SGR 10, 11 and 12, which the library reads as fonts and drops
+        if last == b'm' {
+            for p in params.split(|&b| b == b';') {
+                match p {
+                    b"10" => self.charsets.sco_acs = 0,
+                    b"11" => self.charsets.sco_acs = 1,
+                    b"12" => self.charsets.sco_acs = 2,
+                    _ => {}
+                }
+            }
+        }
         let c = &self.config;
         // `03` and `3;1` mean the same as `3` to the emulator
         let first = std::str::from_utf8(params).ok().and_then(|p| p.split(';').next()?.parse::<u32>().ok());
@@ -253,12 +322,22 @@ impl Filter {
             // keeps the old screen out of the scrollback; the terminal does it
             // itself, so the host's saved cursor isn't used up
             (_, b'J') if first == Some(2) && !c.erase_to_scrollback => Some(ERASE_IN_PLACE.to_vec()),
-            (_, b't') if first == Some(21) => {
+            // 20 asks for the icon's title and 21 the window's; RUSTuTTY has
+            // one title for both
+            (_, b't') if matches!(first, Some(20 | 21)) => {
+                let kind = if first == Some(20) { b'L' } else { b'l' };
                 match c.title_query {
-                    1 => actions.push(Action::Reply(b"\x1b]l\x1b\\".to_vec())),
-                    2 => actions.push(Action::ReportTitle),
+                    1 => actions.push(Action::Reply(format!("\x1b]{}\x1b\\", kind as char).into_bytes())),
+                    2 => actions.push(Action::ReportTitle(kind)),
                     _ => {}
                 }
+                Some(Vec::new())
+            }
+            // xterm's window operations, which PuTTY does: the window acts on
+            // them or answers. 18 and the title stack are the library's own.
+            (_, b't') if matches!(first, Some(1..=9 | 11 | 13 | 14 | 19 | 24..)) => {
+                let numbers = std::str::from_utf8(params).unwrap_or("").split(';').map(|n| n.parse().unwrap_or(0)).collect();
+                actions.push(Action::WindowOp(numbers));
                 Some(Vec::new())
             }
             (_, b'm') => self.sgr(params),
@@ -303,6 +382,13 @@ impl Filter {
             let state = std::mem::replace(&mut self.state, State::Ground);
             self.state = match state {
                 State::Ground => match b {
+                    // SGR 11 and 12 show control characters as code page
+                    // 437's pictures, 12 from its top half, as PuTTY
+                    b if self.charsets.sco_acs > 0 && b < 0x20 && !matches!(b, 0x1b | b'\n' | b'\r' | 0x08) => {
+                        let shown = cp437(if self.charsets.sco_acs == 2 { b | 0x80 } else { b });
+                        out.extend(shown.to_string().into_bytes());
+                        State::Ground
+                    }
                     0x1b => State::Escape,
                     0x05 => {
                         if !self.config.answerback.is_empty() {
@@ -311,6 +397,17 @@ impl Filter {
                         State::Ground
                     }
                     0x0e | 0x0f if self.config.no_charset => State::Ground,
+                    0x0e | 0x0f => {
+                        self.charsets.shifted = b == 0x0e;
+                        out.push(b);
+                        State::Ground
+                    }
+                    b'#' if self.charsets.active() == b'A' => {
+                        out.extend("£".as_bytes());
+                        State::Ground
+                    }
+                    // the top half of a Latin-1 text, as code page 437
+                    0xc2 | 0xc3 if self.charsets.active() == b'U' => State::ScoLead(b),
                     b'\r' if self.config.cr_implies_lf => {
                         out.extend(b"\r\n");
                         State::Ground
@@ -346,17 +443,88 @@ impl Filter {
                         State::Escape
                     }
                     b'[' => State::Csi(Vec::new()),
-                    b']' | b'P' | b'^' | b'_' | b'X' => {
+                    b']' => State::OscStart,
+                    b'P' | b'^' | b'_' | b'X' => {
                         out.extend([0x1b, b]);
                         State::Text(0)
                     }
                     b'(' | b')' | b'*' | b'+' if self.config.no_charset => State::Charset,
+                    b'(' | b')' | b'*' | b'+' => State::Designate(b),
+                    // a full reset puts the character sets back too
+                    b'c' => {
+                        self.charsets = Charsets::default();
+                        out.extend(b"\x1bc");
+                        State::Ground
+                    }
                     b => {
                         out.extend([0x1b, b]);
                         State::Ground
                     }
                 },
                 State::Charset => State::Ground,
+                State::Designate(_) if b == 0x1b => State::Escape,
+                State::Designate(which) if b < 0x20 => {
+                    out.push(b);
+                    State::Designate(which)
+                }
+                // the library is told plain ASCII for the sets done here
+                State::Designate(which) => {
+                    let g = b"()*+".iter().position(|&c| c == which).unwrap_or(0);
+                    self.charsets.sets[g] = b;
+                    out.extend([0x1b, which, if matches!(b, b'A' | b'U') { b'B' } else { b }]);
+                    State::Ground
+                }
+                State::ScoLead(lead) if (0x80..=0xbf).contains(&b) => {
+                    let byte = ((lead & 0x1f) << 6) | (b & 0x3f);
+                    out.extend(cp437(byte).to_string().into_bytes());
+                    State::Ground
+                }
+                State::ScoLead(lead) => {
+                    out.extend([lead, b]);
+                    State::Ground
+                }
+                // the Linux console's palette codes, which have no ending of
+                // their own: OSC P and seven hex digits sets a colour, and
+                // OSC R puts them all back
+                State::OscStart => match b {
+                    b'P' => State::LinuxPalette(Vec::new()),
+                    b'R' => {
+                        out.extend(b"\x1b]104\x07");
+                        State::Ground
+                    }
+                    0x07 | 0x18 | 0x1a => {
+                        out.extend([0x1b, b']', b]);
+                        State::Ground
+                    }
+                    0x1b => {
+                        out.extend(b"\x1b]\x1b\\");
+                        State::Escape
+                    }
+                    _ => {
+                        out.extend([0x1b, b']', b]);
+                        State::Text(1)
+                    }
+                },
+                State::LinuxPalette(mut digits) if b.is_ascii_hexdigit() => {
+                    digits.push(b);
+                    if digits.len() < 7 {
+                        State::LinuxPalette(digits)
+                    } else {
+                        let d = |i: usize| digits[i] as char;
+                        let entry = u8::from_str_radix(&d(0).to_string(), 16).unwrap_or(0);
+                        out.extend(format!("\x1b]4;{entry};rgb:{}{}/{}{}/{}{}\x07", d(1), d(2), d(3), d(4), d(5), d(6)).into_bytes());
+                        State::Ground
+                    }
+                }
+                // not a palette code after all: it's dropped, and this byte
+                // goes on as usual
+                State::LinuxPalette(_) => match b {
+                    0x1b => State::Escape,
+                    b => {
+                        out.push(b);
+                        State::Ground
+                    }
+                },
                 State::Csi(_) | State::CsiIgnore if b == 0x1b => State::Escape,
                 State::Csi(_) | State::CsiIgnore if matches!(b, 0x18 | 0x1a) => {
                     out.push(b);
@@ -569,6 +737,39 @@ mod tests {
     }
 
     #[test]
+    fn uk_and_sco_character_sets() {
+        assert_eq!(CP437_HIGH.chars().count(), 128);
+        let mut f = filter(&[]);
+        assert_eq!(run(&mut f, b"\x1b(A#\x1b(B#").0, "\x1b(B£\x1b(B#".as_bytes(), "the UK set has £ for #");
+        assert_eq!(run(&mut f, b"\x1b)A#\x0e#\x0f#").0, "\x1b)B#\x0e£\x0f#".as_bytes(), "in G1, after Shift Out");
+        assert_eq!(run(&mut f, "\x1b(U\u{e9}\u{c9}\x1b(B\u{e9}".as_bytes()).0, "\x1b(BΘ╔\x1b(B\u{e9}".as_bytes(), "SCO's set is code page 437");
+        assert_eq!(run(&mut f, b"\x1b[11m\x01\r\x1b[12m\x01\x1b[10m\x01").0, "\x1b[11m☺\r\x1b[12mü\x1b[10m\x01".as_bytes(), "SGR 11 and 12 show control characters");
+        assert_eq!(run(&mut f, b"\x1b(A\x1bc#").0, b"\x1b(B\x1bc#", "a reset puts the set back");
+        assert_eq!(run(&mut filter(&[("NoRemoteCharset", 1)]), b"\x1b(A#").0, b"#", "and the setting still refuses them");
+    }
+
+    #[test]
+    fn linux_palette_codes_become_osc_4() {
+        let mut f = filter(&[]);
+        assert_eq!(run(&mut f, b"a\x1b]P1ff8000b").0, b"a\x1b]4;1;rgb:ff/80/00\x07b");
+        assert_eq!(run(&mut f, b"\x1b]R").0, b"\x1b]104\x07");
+        assert_eq!(run(&mut f, b"\x1b]Pzx").0, b"zx", "a broken one ends there, not left open");
+        assert_eq!(run(&mut f, b"\x1b]2;t\x07").0, b"\x1b]2;t\x07", "other strings pass as before");
+    }
+
+    #[test]
+    fn window_operations_go_to_the_window() {
+        let mut f = filter(&[]);
+        let (out, actions) = run(&mut f, b"\x1b[8;24;80t\x1b[18t\x1b[14t");
+        assert_eq!(out, b"\x1b[18t", "the library answers 18 itself");
+        assert_eq!(actions, [Action::WindowOp(vec![8, 24, 80]), Action::WindowOp(vec![14])]);
+        let (out, actions) = run(&mut f, b"\x1b[?3h");
+        assert_eq!(out, b"\x1b[?3h");
+        assert_eq!(actions, [Action::WindowOp(vec![8, 0, 132])]);
+        assert_eq!(run(&mut filter(&[("RemoteQTitleAction", 2)]), b"\x1b[20t").1, [Action::ReportTitle(b'L')]);
+    }
+
+    #[test]
     fn older_alternate_screen_modes_and_reverse_video() {
         let mut f = filter(&[]);
         assert_eq!(run(&mut f, b"\x1b[?47h").0, b"\x1b[?1049h");
@@ -597,7 +798,7 @@ mod tests {
         let (out, a) = run(&mut filter(&[]), b"\x05\x1b[21t");
         assert!(out.is_empty());
         assert_eq!(a, [Action::Reply(b"PuTTY".to_vec()), Action::Reply(b"\x1b]l\x1b\\".to_vec())]);
-        assert_eq!(run(&mut filter(&[("RemoteQTitleAction", 2)]), b"\x1b[21t").1, [Action::ReportTitle]);
+        assert_eq!(run(&mut filter(&[("RemoteQTitleAction", 2)]), b"\x1b[21t").1, [Action::ReportTitle(b'l')]);
         assert!(run(&mut filter(&[("RemoteQTitleAction", 0)]), b"\x1b[21t").1.is_empty());
     }
 

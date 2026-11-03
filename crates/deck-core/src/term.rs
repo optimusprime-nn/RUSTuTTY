@@ -6,6 +6,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
+use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
 use alacritty_terminal::vte::ansi::{ClearMode, Color, CursorShape, CursorStyle, Handler, NamedColor, Processor};
 use crate::filter::{Action, Filter, FilterConfig, ERASE_IN_PLACE};
@@ -76,22 +77,40 @@ impl Palette {
         }
     }
 
-    fn resolve(&self, c: Color, bold: bool, default: Rgb) -> Rgb {
+    /// A palette entry, or the colour the host gave it with OSC 4 (or Linux's
+    /// OSC P), as PuTTY lets a host change its palette.
+    fn entry(&self, i: u8, host: &Colors) -> Rgb {
+        host[i as usize].map_or_else(|| self.indexed(i), |c| (c.r, c.g, c.b))
+    }
+
+    fn resolve(&self, c: Color, bold: bool, default: Rgb, host: &Colors) -> Rgb {
         let brighten = bold && self.bold_as_colour;
         match c {
             Color::Spec(c) => (c.r, c.g, c.b),
-            Color::Indexed(i) if brighten && i < 8 => self.ansi[i as usize + 8],
-            Color::Indexed(i) => self.indexed(i),
+            Color::Indexed(i) if brighten && i < 8 => self.entry(i + 8, host),
+            Color::Indexed(i) => self.entry(i, host),
             Color::Named(n) => {
                 let i = n as usize;
                 if i < 16 {
-                    self.ansi[if brighten && i < 8 { i + 8 } else { i }]
+                    self.entry(if brighten && i < 8 { i + 8 } else { i } as u8, host)
                 } else if n == NamedColor::Background {
                     self.bg
                 } else {
                     default
                 }
             }
+        }
+    }
+
+    /// The colour a query for entry `i` is answered with, as the terminal
+    /// library numbers them: the 256-colour palette, then the default text
+    /// and background, then the cursor.
+    fn queried(&self, i: usize, host: &Colors) -> Rgb {
+        match i {
+            0..=255 => self.entry(i as u8, host),
+            256 => self.fg,
+            257 => self.bg,
+            _ => self.cursor,
         }
     }
 }
@@ -145,6 +164,9 @@ pub enum TermEvent {
     /// Reverse video on and straight off again: PuTTY makes sure that shows,
     /// as a visual bell does.
     Flash,
+    /// An xterm window operation for the window to do or answer, its numbers
+    /// as the host sent them.
+    WindowOp(Vec<u32>),
 }
 
 /// How long reverse video turned on and off must show for, as PuTTY's
@@ -176,8 +198,13 @@ pub fn rtf(text: &str, font: &str, points: u32) -> String {
     out
 }
 
+/// A host asking what colour a palette entry is, and how to word the answer.
+type ColourQuery = (usize, Arc<dyn Fn(alacritty_terminal::vte::ansi::Rgb) -> String + Send + Sync>);
+
+/// What the terminal library raises: events, and colour queries, which wait
+/// for the palette in `Terminal::feed` to be answered.
 #[derive(Clone, Default)]
-struct Listener(Arc<Mutex<Vec<TermEvent>>>);
+struct Listener(Arc<Mutex<Vec<TermEvent>>>, Arc<Mutex<Vec<ColourQuery>>>);
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
@@ -185,6 +212,10 @@ impl EventListener for Listener {
             Event::PtyWrite(s) => TermEvent::Reply(s.into_bytes()),
             Event::Title(t) => TermEvent::Title(clean_title(&t)),
             Event::Bell => TermEvent::Bell,
+            Event::ColorRequest(i, answer) => {
+                self.1.lock().unwrap().push((i, answer));
+                return;
+            }
             _ => return,
         };
         self.0.lock().unwrap().push(e);
@@ -450,10 +481,21 @@ impl Terminal {
         if selected.is_some_and(|before| self.term.selection_to_string() != before) {
             self.term.selection = None;
         }
+        // colour queries, answered from the palette as it is now
+        let queries = std::mem::take(&mut *self.events.1.lock().unwrap());
+        for (i, answer) in queries {
+            let (r, g, b) = self.palette.queried(i, self.term.colors());
+            let reply = answer(alacritty_terminal::vte::ansi::Rgb { r, g, b });
+            self.events.0.lock().unwrap().push(TermEvent::Reply(reply.into_bytes()));
+        }
         for a in actions {
             let reply = match a {
                 Action::Reply(b) => b,
-                Action::ReportTitle => format!("\x1b]l{}\x1b\\", clean_title(&self.title)).into_bytes(),
+                Action::ReportTitle(kind) => format!("\x1b]{}{}\x1b\\", kind as char, clean_title(&self.title)).into_bytes(),
+                Action::WindowOp(numbers) => {
+                    self.events.0.lock().unwrap().push(TermEvent::WindowOp(numbers));
+                    continue;
+                }
                 Action::Print(b) => {
                     self.events.0.lock().unwrap().push(TermEvent::Print(b));
                     continue;
@@ -775,8 +817,8 @@ impl Terminal {
                 continue;
             }
             let bold = cell.flags.contains(Flags::BOLD);
-            let mut fg = p.resolve(cell.fg, bold, if bold { p.bold_fg } else { p.fg });
-            let mut bg = p.resolve(cell.bg, false, p.bg);
+            let mut fg = p.resolve(cell.fg, bold, if bold { p.bold_fg } else { p.fg }, content.colors);
+            let mut bg = p.resolve(cell.bg, false, p.bg, content.colors);
             if cell.flags.contains(Flags::DIM) {
                 fg = (fg.0 / 3 * 2, fg.1 / 3 * 2, fg.2 / 3 * 2);
             }
@@ -868,6 +910,23 @@ mod tests {
         assert_eq!(t.screen().rows[2][0].bg, (10, 20, 30), "so does a colour");
         assert_eq!(t.scroll_position().0, history, "the scrollback stays");
         assert_eq!(t.row_text(0).trim(), "line", "and so does the screen");
+    }
+
+    #[test]
+    fn hosts_can_change_and_ask_about_the_palette() {
+        let mut t = Terminal::new(10, 2);
+        t.feed(b"\x1b]4;1;rgb:12/34/56\x07\x1b[31mx");
+        assert_eq!(t.screen().rows[0][0].fg, (0x12, 0x34, 0x56), "OSC 4 changes red");
+        t.feed(b"\x1b]P2abcdef");
+        t.feed(b"\x1b[32my");
+        assert_eq!(t.screen().rows[0][1].fg, (0xab, 0xcd, 0xef), "so does Linux's OSC P");
+        t.take_events();
+        t.feed(b"\x1b]4;1;?\x07");
+        let replies: Vec<String> = t.take_events().into_iter().filter_map(|e| if let TermEvent::Reply(r) = e { Some(String::from_utf8_lossy(&r).into_owned()) } else { None }).collect();
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert!(replies[0].starts_with("\x1b]4;1;rgb:1212/3434/5656"), "{replies:?}");
+        t.feed(b"\x1b]R");
+        assert_ne!(t.screen().rows[0][0].fg, (0x12, 0x34, 0x56), "OSC R puts the palette back");
     }
 
     #[test]

@@ -670,6 +670,26 @@ async fn double_and_triple_clicks() {
     }
 }
 
+/// xterm's window operations: the host can ask the window's size in pixels
+/// and set it in characters.
+#[tokio::test(flavor = "multi_thread")]
+async fn hosts_can_ask_and_set_the_window_size() {
+    let peer = Peer::start().await;
+    let app = App::start(&raw_args(peer.port));
+    peer.connected(1).await;
+    let d = app.until("session", |d| d.contains("sessions=1")).await;
+    let (cols, rows) = field(&d, "grid=").split_once('x').map(|(c, r)| (c.parse::<i32>().unwrap(), r.parse::<i32>().unwrap())).unwrap();
+    peer.send(0, b"\x1b[14t\x1b[11t");
+    peer.wait(0, b"\x1b[1t").await;
+    // the text area in pixels: whole cells high and wide
+    let got = String::from_utf8_lossy(&peer.received(0)).to_string();
+    let size = got.strip_prefix("\x1b[4;").and_then(|r| r.split('t').next()).unwrap_or_else(|| panic!("{got:?}"));
+    let (h, w) = size.split_once(';').map(|(h, w)| (h.parse::<i32>().unwrap(), w.parse::<i32>().unwrap())).unwrap();
+    assert!(h > 0 && w > 0 && h % rows == 0 && w % cols == 0, "{h}x{w} for {cols}x{rows}");
+    peer.send(0, b"\x1b[8;20;60t");
+    app.until("resized by the host", |d| field(d, "grid=") == "60x20").await;
+}
+
 /// The middle button extends a selection as it goes down and while it's
 /// dragged, and Copy leaves the selection in place.
 #[tokio::test(flavor = "multi_thread")]
