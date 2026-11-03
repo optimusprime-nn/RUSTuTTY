@@ -1117,11 +1117,20 @@ impl Deck {
         }
     }
 
+    /// Copy, as PuTTY's, leaves the selection where it is.
     fn copy(&mut self) {
+        self.copy_then(false);
+    }
+
+    /// Plain Ctrl+C copies and lets the selection go, so the next press
+    /// interrupts the program as usual.
+    fn copy_then(&mut self, clear: bool) {
         if let Some(s) = self.current() {
             if let Some(text) = s.term.selected_text() {
                 copy_out(&s.target.settings, &text);
-                s.term.clear_selection();
+                if clear {
+                    s.term.clear_selection();
+                }
             }
         }
         self.redraw();
@@ -1264,7 +1273,7 @@ impl Deck {
         let (has_sel, alt) = self.current().map_or((false, false), |s| (s.term.has_selection(), s.term.alt_screen()));
         let action = if vk < 128 { shortcut(vk as u8, ctrl, shift, has_sel, alt) } else { Shortcut::PassThrough };
         match action {
-            Shortcut::Copy => self.copy(),
+            Shortcut::Copy => self.copy_then(!shift),
             Shortcut::Paste => self.paste(),
             Shortcut::NewSession => take_focus(self.edit),
             Shortcut::Duplicate => {
@@ -1450,19 +1459,38 @@ impl Deck {
         self.current().map_or(true, |s| s.target.settings.s("MousePaste", "explicit") != "none")
     }
 
-    fn extend_or_paste(&mut self, extend: bool, lp: LPARAM) {
-        if extend {
-            let (x, y) = self.cell_at(lp);
-            let auto = self.autocopy();
-            if let Some(s) = self.current() {
-                s.term.select_extend(x, y);
-                if let (true, Some(text)) = (auto, s.term.selected_text()) {
-                    copy_out(&s.target.settings, &text);
-                }
-            }
-            self.redraw();
-        } else if self.may_paste_with_mouse() {
+    fn paste_with_mouse(&mut self) {
+        if self.may_paste_with_mouse() {
             self.paste();
+        }
+    }
+
+    /// The extend button going down: the nearer end of the selection moves
+    /// to the pointer, and follows it until the button comes up.
+    fn extend_start(&mut self, lp: LPARAM) {
+        let (x, y) = self.cell_at(lp);
+        unsafe {
+            SetCapture(self.content);
+        }
+        self.selecting = true;
+        if let Some(s) = self.current() {
+            s.term.select_extend(x, y);
+        }
+        self.redraw();
+    }
+
+    /// A selecting button came up: the selection is copied if `MouseAutocopy` says so.
+    fn select_end(&mut self) {
+        unsafe {
+            let _ = ReleaseCapture();
+            let _ = KillTimer(Some(self.content), TIMER_DRAG);
+        }
+        self.selecting = false;
+        let auto = self.autocopy();
+        if let Some(s) = self.current() {
+            if let (true, Some(text)) = (auto, s.term.selected_text()) {
+                copy_out(&s.target.settings, &text);
+            }
         }
     }
 
@@ -2186,24 +2214,21 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         }
         WM_MOUSEMOVE if d.pointer_hidden && !d.selecting => d.show_pointer(),
         WM_MOUSEMOVE if d.selecting => d.drag_select(lp),
-        WM_LBUTTONUP => {
-            let _ = ReleaseCapture();
-            let _ = KillTimer(Some(hwnd), TIMER_DRAG);
-            d.selecting = false;
-            let auto = d.autocopy();
-            if let Some(s) = d.current() {
-                if let (true, Some(text)) = (auto, s.term.selected_text()) {
-                    copy_out(&s.target.settings, &text);
-                }
+        // the extend button acts as it goes down and while it's dragged, as in
+        // PuTTY: middle, or right in xterm style
+        WM_MBUTTONDOWN if d.mouse_style() != 1 => d.extend_start(lp),
+        WM_RBUTTONDOWN if d.mouse_style() == 1 => d.extend_start(lp),
+        WM_LBUTTONUP => d.select_end(),
+        WM_MBUTTONUP | WM_RBUTTONUP if d.selecting => d.select_end(),
+        WM_MBUTTONUP => {
+            // the extend button already did its work going down
+            if d.mouse_style() == 1 {
+                d.paste_with_mouse();
             }
         }
-        WM_MBUTTONUP => {
-            let style = d.mouse_style();
-            d.extend_or_paste(style != 1, lp);
-        }
         WM_RBUTTONUP => match d.mouse_style() {
-            0 => d.extend_or_paste(false, lp),
-            1 => d.extend_or_paste(true, lp),
+            0 => d.paste_with_mouse(),
+            1 => {}
             _ => d.context_menu(),
         },
         _ => return DefWindowProcW(hwnd, msg, wp, lp),

@@ -245,6 +245,41 @@ fn line_encoding(name: &str) -> &'static Encoding {
     Encoding::for_label(label.as_bytes()).unwrap_or(UTF_8)
 }
 
+/// PuTTY's default character classes for double-click selection, 32 to a
+/// line from character 0, as settings.c has them: 0 is space, 1 punctuation
+/// and 2 part of a word.
+const WORDNESS: [&str; 8] = [
+    "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+    "0,1,2,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1,1",
+    "1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,2",
+    "1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1,1,1",
+    "1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1",
+    "1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1",
+    "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,2,2,2,2,2,2,2,2",
+    "2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,2,2,2,2,2,2,2,2",
+];
+
+/// The characters a double click stops at, from the `Wordness` settings.
+/// The terminal library knows only word characters and breaks, so every
+/// character PuTTY doesn't class as part of a word is a break.
+fn word_breaks(s: &Settings) -> String {
+    let mut breaks = String::new();
+    for (block, default) in WORDNESS.iter().enumerate() {
+        let saved = s.s(&format!("Wordness{}", block * 32), default);
+        let classes: Vec<&str> = saved.split(',').collect();
+        let defaults: Vec<&str> = default.split(',').collect();
+        for i in 0..32 {
+            let class = classes.get(i).map(|c| c.trim()).filter(|c| !c.is_empty()).unwrap_or(defaults[i]);
+            if class != "2" {
+                if let Some(c) = char::from_u32((block * 32 + i) as u32) {
+                    breaks.push(c);
+                }
+            }
+        }
+    }
+    breaks
+}
+
 /// The fewest lines of scrollback a session keeps. PuTTY's saved sessions
 /// usually ask for 2000, which a long install or log outgrows, losing its
 /// start. A session can ask for more, not less.
@@ -267,6 +302,7 @@ impl Terminal {
             // A remote host must not be able to touch the clipboard.
             osc52: Osc52::Disabled,
             default_cursor_style: cursor_style(s),
+            semantic_escape_chars: word_breaks(s),
             ..Config::default()
         }
     }
@@ -564,9 +600,25 @@ impl Terminal {
 
     /// Extends the selection from whichever end is nearer, for the mouse button
     /// PuTTY calls "extend".
+    /// As PuTTY: the end of the selection nearer the pointer moves, and the
+    /// other stays. A rectangle keeps its nearest corner's opposite. Words or
+    /// lines stay words or lines.
     pub fn select_extend(&mut self, col: usize, row: usize) {
-        if self.anchor.is_none() {
-            self.select_start(col, row);
+        let p = self.point(col, row);
+        let range = self.term.selection.as_ref().and_then(|s| s.to_range(&self.term));
+        match range {
+            Some(r) if self.kind == SelectionType::Block => {
+                let line = if 2 * p.line.0 < r.start.line.0 + r.end.line.0 { r.end.line } else { r.start.line };
+                let column = if 2 * p.column.0 < r.start.column.0 + r.end.column.0 { r.end.column } else { r.start.column };
+                self.anchor = Some(Point::new(line, column));
+            }
+            Some(r) => {
+                let cols = self.term.columns() as i64;
+                let at = |q: Point| q.line.0 as i64 * cols + q.column.0 as i64;
+                let near_start = at(p) - at(r.start) < (at(r.end) - at(r.start)) / 2;
+                self.anchor = Some(if near_start { r.end } else { r.start });
+            }
+            None => self.select_start(col, row),
         }
         self.dragged = true;
         self.select_to(col, row);
@@ -639,11 +691,12 @@ impl Terminal {
     /// bracket and run as commands.
     pub fn paste_bytes(&mut self, text: &str) -> Vec<u8> {
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
-        // `PasteControls` off: as in PuTTY, only tab and line ends get through
+        // `PasteControls` off: as in PuTTY, after xterm, only tab, line ends,
+        // Backspace and DEL get through
         let text: String = if self.paste_controls {
             text
         } else {
-            text.chars().filter(|&c| !c.is_control() || c == '\t' || c == '\r').collect()
+            text.chars().filter(|&c| !c.is_control() || matches!(c, '\t' | '\r' | '\x08' | '\x7f')).collect()
         };
         if self.bracketed_paste && self.term.mode().contains(TermMode::BRACKETED_PASTE) {
             let clean: String = text.chars().filter(|&c| c != '\x1b').collect();
@@ -791,6 +844,41 @@ mod tests {
         assert_eq!(t.screen().rows[2][0].bg, (10, 20, 30), "so does a colour");
         assert_eq!(t.scroll_position().0, history, "the scrollback stays");
         assert_eq!(t.row_text(0).trim(), "line", "and so does the screen");
+    }
+
+    #[test]
+    fn double_click_words_follow_puttys_classes() {
+        let mut t = Terminal::new(40, 3);
+        t.feed(b"cd /usr/local_bin user@host a=b");
+        t.select_word(6, 0);
+        assert_eq!(t.selected_text().as_deref(), Some("/usr/local_bin"), "- . / _ are word characters");
+        t.select_word(19, 0);
+        assert_eq!(t.selected_text().as_deref(), Some("user"), "@ is not");
+        let mut s = Settings::default();
+        // the line from 64 with @ (64) as part of a word
+        s.set("Wordness64", Value::Str("2,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1".into()));
+        t.reconfigure(&s);
+        t.select_word(19, 0);
+        assert_eq!(t.selected_text().as_deref(), Some("user@host"), "the setting changes it");
+    }
+
+    #[test]
+    fn extend_moves_the_nearer_end() {
+        let mut t = Terminal::new(40, 3);
+        t.feed(b"0123456789abcdefghij");
+        t.select_start(5, 0);
+        t.select_to(14, 0);
+        assert_eq!(t.selected_text().as_deref(), Some("56789abcde"));
+        t.select_extend(2, 0);
+        assert_eq!(t.selected_text().as_deref(), Some("23456789abcde"), "the start moved; the end stayed");
+        t.select_extend(17, 0);
+        assert_eq!(t.selected_text().as_deref(), Some("23456789abcdefgh"), "now the end moves");
+    }
+
+    #[test]
+    fn paste_keeps_backspace_and_delete() {
+        let mut t = Terminal::new(20, 3);
+        assert_eq!(t.paste_bytes("a\x08b\x7fc\x01d"), b"a\x08b\x7fcd");
     }
 
     #[test]

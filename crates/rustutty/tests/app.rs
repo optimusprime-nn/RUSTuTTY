@@ -670,6 +670,29 @@ async fn double_and_triple_clicks() {
     }
 }
 
+/// The middle button extends a selection as it goes down and while it's
+/// dragged, and Copy leaves the selection in place.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_extend_button_and_copy() {
+    let peer = Peer::start().await;
+    let app = App::start(&raw_args(peer.port));
+    peer.connected(1).await;
+    peer.send(0, b"0123456789abcdef");
+    app.sees("row=0123456789abcdef").await;
+    app.drag((5, 0), (8, 0));
+    app.until("selected", |d| field(d, "clip=") == "\"5678\"").await;
+    let cell = app.cell();
+    let at = |c: i32| ((cell.1 / 2) << 16 | (c * cell.0 + cell.0 / 2)) as isize;
+    app.post(app.content, WM_MBUTTONDOWN, 16, at(3));
+    app.post(app.content, WM_MOUSEMOVE, 16, at(1));
+    app.post(app.content, WM_MBUTTONUP, 0, at(1));
+    app.until("extended from the start", |d| field(d, "clip=") == "\"12345678\"").await;
+    app.set_clip("other");
+    app.click("Copy");
+    let d = app.until("copied", |d| field(d, "clip=") == "\"12345678\"").await;
+    assert!(d.contains("selection=true"), "Copy leaves the selection");
+}
+
 /// PuTTY's keys with no letter of their own: Ctrl+2 to Ctrl+8, Ctrl+- and
 /// Ctrl+Shift+' send control characters, and Pause sends Ctrl+Z.
 #[tokio::test(flavor = "multi_thread")]
