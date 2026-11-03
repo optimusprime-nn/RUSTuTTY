@@ -628,6 +628,56 @@ async fn the_window_has_a_scrollbar_that_follows_the_scrollback() {
     assert_eq!(info.nPos, info.nMax - info.nPage as i32 + 1, "the view starts at the bottom");
 }
 
+/// Dragging a selection above the text scrolls back, and keeps scrolling while
+/// the pointer is held there; dragging below scrolls forward again.
+#[tokio::test(flavor = "multi_thread")]
+async fn selecting_past_the_edge_scrolls() {
+    let peer = Peer::start().await;
+    let app = App::start(&raw_args(peer.port));
+    peer.connected(1).await;
+    let lines: String = (0..200).map(|i| format!("line {i}\r\n")).collect();
+    peer.send(0, lines.as_bytes());
+    let d = app.sees("row=line 199").await;
+    let first_shown: u32 = d.lines().find_map(|l| l.strip_prefix("row=line ")).unwrap().trim().parse().unwrap();
+    let pos = || {
+        let mut info = SCROLLINFO { cbSize: std::mem::size_of::<SCROLLINFO>() as u32, fMask: SIF_ALL, ..Default::default() };
+        unsafe { GetScrollInfo(app.content, SB_VERT, &mut info).unwrap() };
+        info.nPos
+    };
+    let bottom = pos();
+    let cell = app.cell();
+    let at = |x: i32, y: i32| ((y as i16 as u16 as isize) << 16) | (x as u16 as isize);
+
+    app.post(app.content, WM_LBUTTONDOWN, 1, at(cell.0 * 3, cell.1 * 5));
+    app.post(app.content, WM_MOUSEMOVE, 1, at(cell.0 * 3, -cell.1 * 2));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let moved = pos();
+    assert!(moved < bottom, "dragging above the text scrolls back: {bottom} -> {moved}");
+    // no more mouse moves: holding the pointer there keeps it scrolling
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let held = pos();
+    assert!(held < moved, "holding above the text keeps scrolling: {moved} -> {held}");
+
+    app.post(app.content, WM_LBUTTONUP, 0, at(cell.0 * 3, -cell.1 * 2));
+    let d = app.until("selection copied", |d| field(d, "clip=").contains("line ")).await;
+    let clip = field(&d, "clip=");
+    assert!(clip.contains(&format!("line {}", first_shown - 1)), "the selection reaches lines that were off screen: {clip}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(pos(), held, "letting go stops the scrolling");
+
+    // and back down past the bottom
+    let rect = {
+        let mut r = RECT::default();
+        unsafe { GetClientRect(app.content, &mut r).unwrap() };
+        r
+    };
+    app.post(app.content, WM_LBUTTONDOWN, 1, at(cell.0 * 3, cell.1 * 2));
+    app.post(app.content, WM_MOUSEMOVE, 1, at(cell.0 * 3, rect.bottom + cell.1 * 2));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(pos() > held, "dragging below the text scrolls forward");
+    app.post(app.content, WM_LBUTTONUP, 0, at(cell.0 * 3, rect.bottom + cell.1 * 2));
+}
+
 /// The wheel and the scrollbar move back through the scrollback.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_wheel_and_scrollbar_scroll_back() {

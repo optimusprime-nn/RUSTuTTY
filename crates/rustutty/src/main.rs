@@ -85,8 +85,12 @@ const SECTION: i32 = 24;
 const SCROLL_STEP: i32 = 3;
 const TIMER_BLINK: usize = 1;
 const TIMER_FLASH: usize = 2;
+const TIMER_DRAG: usize = 3;
 const BLINK_MS: u32 = 530;
 const FLASH_MS: u32 = 100;
+const DRAG_MS: u32 = 50;
+/// Lines scrolled per step when selecting past the edge, however far out the pointer is.
+const DRAG_MOST: i32 = 10;
 
 type Inbox = Arc<Mutex<Vec<(u64, Event)>>>;
 
@@ -160,6 +164,9 @@ struct Deck {
     skip_char: bool,
     high_surrogate: Option<u16>,
     selecting: bool,
+    /// Where the pointer last was while selecting, for the timer that keeps
+    /// scrolling while it's held above or below the text.
+    drag_at: LPARAM,
     focused: bool,
     started: std::time::Instant,
     cursor_off: bool,
@@ -1338,8 +1345,46 @@ impl Deck {
         self.current().map_or(true, |s| s.target.settings.b("MouseAutocopy", true))
     }
 
+    /// Extends the selection to the pointer. Above or below the text it scrolls,
+    /// faster the further out it is, and keeps scrolling on a timer while the
+    /// pointer stays there, as PuTTY does.
+    fn drag_select(&mut self, lp: LPARAM) {
+        self.drag_at = lp;
+        let b = self.border();
+        let x = (lp.0 & 0xffff) as i16 as i32 - b;
+        let y = ((lp.0 >> 16) & 0xffff) as i16 as i32 - b;
+        let col = (x / self.cell.0).max(0) as usize;
+        let row = y.div_euclid(self.cell.1);
+        let mut outside = false;
+        if let Some(s) = self.current() {
+            let rows = s.term.size().1 as i32;
+            let past = if row < 0 { row } else { (row - rows + 1).max(0) };
+            if past != 0 {
+                s.term.scroll(-past.clamp(-DRAG_MOST, DRAG_MOST));
+                outside = true;
+            }
+            s.term.select_to(col, row.clamp(0, rows - 1) as usize);
+        }
+        unsafe {
+            if outside {
+                SetTimer(Some(self.content), TIMER_DRAG, DRAG_MS, None);
+            } else {
+                let _ = KillTimer(Some(self.content), TIMER_DRAG);
+            }
+        }
+        self.redraw();
+    }
+
     fn on_timer(&mut self, id: usize) {
-        if id == TIMER_FLASH {
+        if id == TIMER_DRAG {
+            if self.selecting {
+                self.drag_select(self.drag_at);
+            } else {
+                unsafe {
+                    let _ = KillTimer(Some(self.content), TIMER_DRAG);
+                }
+            }
+        } else if id == TIMER_FLASH {
             unsafe {
                 let _ = KillTimer(Some(self.content), TIMER_FLASH);
             }
@@ -1903,15 +1948,10 @@ unsafe extern "system" fn content_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             d.redraw();
         }
         WM_MOUSEMOVE if d.pointer_hidden && !d.selecting => d.show_pointer(),
-        WM_MOUSEMOVE if d.selecting => {
-            let (x, y) = d.cell_at(lp);
-            if let Some(s) = d.current() {
-                s.term.select_to(x, y);
-            }
-            d.redraw();
-        }
+        WM_MOUSEMOVE if d.selecting => d.drag_select(lp),
         WM_LBUTTONUP => {
             let _ = ReleaseCapture();
+            let _ = KillTimer(Some(hwnd), TIMER_DRAG);
             d.selecting = false;
             let auto = d.autocopy();
             if let Some(s) = d.current() {
@@ -2063,7 +2103,7 @@ fn main() {
             cell: (8, 16), dpi: GetDpiForWindow(main).max(96), font_in_use: (String::new(), 0),
             sessions: Vec::new(), active: None, next_id: 1, saved,
             inbox: Default::default(), rt, store,
-            skip_char: false, high_surrogate: None, selecting: false, focused: false,
+            skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), focused: false,
             started: std::time::Instant::now(), cursor_off: false, flash: false, pointer_hidden: false, compose_state: 0, compose_first: 0, full_screen: None, close_held: None, system_items: 0,
         }));
         DECK.store(d, Ordering::Release);
