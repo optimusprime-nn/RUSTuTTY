@@ -52,6 +52,27 @@ jobs:
           Push-Location out
           Get-ChildItem | ForEach-Object { "$((Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content -Encoding ascii SHA256SUMS.txt
           Pop-Location
+      - name: Check every program has the icon
+        shell: pwsh
+        run: |
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class Res {
+            [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)] public static extern IntPtr LoadLibraryEx(string f, IntPtr h, uint flags);
+            [DllImport("kernel32")] public static extern IntPtr FindResource(IntPtr m, IntPtr name, IntPtr type);
+            [DllImport("kernel32")] public static extern bool FreeLibrary(IntPtr m);
+          }
+          '@
+          $name = "RUSTuTTY-${{ steps.version.outputs.version }}"
+          $missing = @()
+          foreach ($exe in @(Get-ChildItem "$name\*.exe") + @(Get-Item "out\$name-setup.exe")) {
+            # LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE: read it, don't run it
+            $m = [Res]::LoadLibraryEx($exe.FullName, [IntPtr]::Zero, 0x22)
+            if ([Res]::FindResource($m, [IntPtr]1, [IntPtr]14) -eq [IntPtr]::Zero) { $missing += $exe.Name }
+            [Res]::FreeLibrary($m) | Out-Null
+          }
+          if ($missing) { throw "No icon in: $($missing -join ', ')" }
+          "Every program has the icon"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release
