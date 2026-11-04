@@ -14,6 +14,15 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
 
+/// Drawn at the screen's own scale, as RUSTuTTY's window is. Without it,
+/// Windows stretches the window on a scaled screen and the text goes soft.
+pub fn sharp() {
+    use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
 pub fn instance() -> HINSTANCE {
     unsafe { GetModuleHandleW(None).map(|m| m.into()).unwrap_or_default() }
 }
@@ -62,6 +71,19 @@ pub fn set_text(h: HWND, text: &str) {
 /// Paints a window's background and its controls' in the theme.
 pub unsafe fn themed(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     match msg {
+        // moved to a screen at another scale: the size Windows suggests, and
+        // the controls' text in a font for that scale
+        WM_DPICHANGED => {
+            let r = &*(lp.0 as *const RECT);
+            let new = font(hwnd);
+            unsafe extern "system" fn set(child: HWND, font: LPARAM) -> windows::core::BOOL {
+                SendMessageW(child, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(1)));
+                true.into()
+            }
+            let _ = EnumChildWindows(Some(hwnd), Some(set), LPARAM(new.0 as isize));
+            let _ = SetWindowPos(hwnd, None, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            Some(LRESULT(0))
+        }
         WM_ERASEBKGND => {
             let mut r = RECT::default();
             let _ = GetClientRect(hwnd, &mut r);

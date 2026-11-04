@@ -83,7 +83,9 @@ fn show(h: HWND, key: Option<&PrivateKey>, pass: &str) {
     set_text(item(h, COMMENT), &key.map(|k| k.comment().to_string()).unwrap_or_default());
     set_text(item(h, PASS), pass);
     set_text(item(h, AGAIN), pass);
-    for id in [PUBLIC_LABEL, PUBLIC, PRINT_LABEL, PRINT, COMMENT_LABEL, COMMENT, PASS_LABEL, PASS, AGAIN_LABEL, AGAIN, SAVE_PUBLIC, SAVE_PRIVATE] {
+    // only the boxes go grey: a greyed label is drawn over itself unerased,
+    // and smears
+    for id in [PUBLIC, PRINT, COMMENT, PASS, AGAIN, SAVE_PUBLIC, SAVE_PRIVATE] {
         unsafe {
             let _ = EnableWindow(item(h, id), key.is_some());
         }
@@ -392,6 +394,7 @@ pub fn run(path: Option<String>) {
             let _ = ShowWindow(GetConsoleWindow(), SW_HIDE);
             let _ = FreeConsole();
         }
+        gui::sharp();
         deck_ui::init(true);
         let instance = gui::instance();
         RegisterClassW(&WNDCLASSW {

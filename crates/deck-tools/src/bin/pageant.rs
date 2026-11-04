@@ -514,6 +514,7 @@ fn run() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     // -c: a command to run once the keys are in, with the rest as its arguments
     let command = args.iter().position(|a| a == "-c").map(|i| args.split_off(i)[1..].to_vec());
+    gui::sharp();
     deck_ui::init(true);
     unsafe {
         if FindWindowW(w!("Pageant"), w!("Pageant")).is_ok() {
