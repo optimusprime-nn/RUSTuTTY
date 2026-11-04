@@ -21,9 +21,11 @@ fn key_file(dir: &std::path::Path, name: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
-async fn held() -> Vec<String> {
-    let stream = pageant::wmmessage::PageantStream::new().await.unwrap();
-    AgentClient::connect(stream).request_identities().await.unwrap().iter().map(|k| k.comment().to_string()).collect()
+/// The comments of the keys the running Pageant holds, or `None` if it didn't
+/// answer.
+async fn held() -> Option<Vec<String>> {
+    let stream = pageant::wmmessage::PageantStream::new().await.ok()?;
+    Some(AgentClient::connect(stream).request_identities().await.ok()?.iter().map(|k| k.comment().to_string()).collect())
 }
 
 /// Pageant holds the keys it's given, and a second Pageant hands its keys to
@@ -48,14 +50,14 @@ async fn pageant_holds_keys_and_takes_more_from_a_second_one() {
     }
     let _first = Stop(first);
     let end = Instant::now() + Duration::from_secs(10);
-    while !running() || held().await.is_empty() {
-        assert!(Instant::now() < end, "Pageant never came up with its key");
+    while !running() || held().await.is_none_or(|k| k.is_empty()) {
+        assert!(Instant::now() < end, "Pageant never came up with its key, or never answered");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(held().await, ["first.ppk"]);
+    assert_eq!(held().await.unwrap(), ["first.ppk"]);
     let second = Command::new(env!("CARGO_BIN_EXE_pageant")).arg(&two).env("RUSTUTTY_PAGEANT_NO_TRAY", "1").output().unwrap();
     assert!(second.status.success(), "the second one handed its key over and left: {}", String::from_utf8_lossy(&second.stderr));
-    let mut keys = held().await;
+    let mut keys = held().await.unwrap();
     keys.sort();
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(keys, ["first.ppk", "second.ppk"]);

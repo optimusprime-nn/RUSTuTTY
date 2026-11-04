@@ -187,6 +187,20 @@ fn own_sid() -> Option<Vec<u8>> {
     }
 }
 
+/// Whether a client's memory has the owner this process has. Programs run as
+/// administrator make what they create owned by the Administrators group, not
+/// the user, so PuTTY's Pageant accepts this owner too (`get_default_sid`).
+unsafe fn owned_like_this_process(owner: PSID) -> bool {
+    let mut mine = PSID::default();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    let found = GetSecurityInfo(GetCurrentProcess(), SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut mine), None, None, None, Some(&mut descriptor));
+    let same = found.is_ok() && !mine.0.is_null() && EqualSid(owner, mine).is_ok();
+    if !descriptor.0.is_null() {
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+    }
+    same
+}
+
 /// Serves a client's request in its shared memory. The memory has to belong to
 /// this user: otherwise another account could use the keys held here.
 unsafe fn serve_mapping(name: &[u16]) -> bool {
@@ -198,7 +212,9 @@ unsafe fn serve_mapping(name: &[u16]) -> bool {
     let found = GetSecurityInfo(map, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut owner), None, None, None, Some(&mut descriptor));
     if let (true, Some(sid)) = (found.is_ok(), own_sid()) {
         let user = &*(sid.as_ptr() as *const TOKEN_USER);
-        if EqualSid(owner, user.User.Sid).is_ok() {
+        // the user, or the owner of this process, which for a program run as
+        // administrator is the Administrators group, as PuTTY's Pageant allows
+        if EqualSid(owner, user.User.Sid).is_ok() || owned_like_this_process(owner) {
             let view = MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, 0);
             if !view.Value.is_null() {
                 let mut info = MEMORY_BASIC_INFORMATION::default();
