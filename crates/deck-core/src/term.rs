@@ -366,9 +366,8 @@ fn word_breaks(s: &Settings) -> String {
     for (block, default) in WORDNESS.iter().enumerate() {
         let saved = s.s(&format!("Wordness{}", block * 32), default);
         let classes: Vec<&str> = saved.split(',').collect();
-        let defaults: Vec<&str> = default.split(',').collect();
-        for i in 0..32 {
-            let class = classes.get(i).map(|c| c.trim()).filter(|c| !c.is_empty()).unwrap_or(defaults[i]);
+        for (i, fallback) in default.split(',').enumerate() {
+            let class = classes.get(i).map(|c| c.trim()).filter(|c| !c.is_empty()).unwrap_or(fallback);
             if class != "2" {
                 if let Some(c) = char::from_u32((block * 32 + i) as u32) {
                     breaks.push(c);
