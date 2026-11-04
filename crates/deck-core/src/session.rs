@@ -96,6 +96,8 @@ pub enum Event {
     /// A line for the Event Log, as PuTTY's logevent: what the connection is
     /// doing, not what the host sends.
     Log(String),
+    /// The remote command's exit status, for Plink to exit with.
+    ExitStatus(u32),
     /// The session is over. The reason is shown in its terminal. The flag is
     /// true when the far end ended it normally, not on an error, which is what
     /// `CloseOnExit` means by a clean exit.

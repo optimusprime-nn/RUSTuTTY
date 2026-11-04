@@ -1031,6 +1031,8 @@ impl Deck {
                 Event::Output(bytes) => s.term.feed(&bytes),
                 // prompts and what's typed into them stay out of the Event Log
                 Event::Local(bytes) => s.term.feed(&bytes),
+                // the window shows the status in the session's last line
+                Event::ExitStatus(_) => {}
                 Event::Log(line) => {
                     s.log.push(stamped(&deck_core::session::clean(&line)));
                     logged = true;

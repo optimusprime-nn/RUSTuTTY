@@ -46,6 +46,7 @@ impl Client {
             Some(Event::Output(b) | Event::Local(b)) => self.output.push_str(&String::from_utf8_lossy(&b)),
             Some(Event::Closed(why, _)) => self.closed = Some(why),
             Some(Event::Log(line)) => self.log.push(line),
+            Some(Event::ExitStatus(_)) => {}
             None => return false,
         }
         true

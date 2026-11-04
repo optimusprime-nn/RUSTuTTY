@@ -69,4 +69,3 @@ The tools differ too:
   aren't set up.
 - Copying as rich text keeps the text and font, not its colours.
 - Resizing a session can't change its font.
-- Plink's exit code isn't the remote command's.

@@ -43,8 +43,9 @@ With a command, Plink runs it on the server and shows its output. Without one,
 it gives you a shell in the console. A command gets no terminal unless you add
 `-t`, as with OpenSSH's `ssh`.
 
-Plink's own exit code doesn't yet pass on the remote command's: a script that
-needs to know whether the command worked should check its output.
+Plink exits with the remote command's exit code, as PuTTY's does, so a script
+can tell whether the command worked. A session that ends without one gives 0 if
+it ended normally and 1 if not.
 
     plink -batch admin@server uptime
     plink -N -L 5432:db:5432 user@gateway

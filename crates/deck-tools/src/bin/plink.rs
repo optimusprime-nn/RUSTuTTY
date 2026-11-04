@@ -4,6 +4,7 @@
 
 use deck_core::settings::Value;
 use deck_tools::{run_console, Args};
+use std::io::Write;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -17,7 +18,9 @@ async fn main() -> anyhow::Result<()> {
         // like ssh, a command has no terminal unless -t asks for one
         target.settings.set("NoPTY", Value::Int((args.no_pty != Some(false)) as u32));
     }
-    let why = run_console(target).await?;
-    eprintln!("{why}");
-    Ok(())
+    let (why, code) = run_console(target).await?;
+    // standard error may already be closed, which mustn't change the exit code
+    let _ = writeln!(std::io::stderr(), "{why}");
+    // the remote command's exit code, as PuTTY's Plink gives
+    std::process::exit(code)
 }

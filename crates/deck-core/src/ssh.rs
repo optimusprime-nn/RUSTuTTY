@@ -989,6 +989,7 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
                 Some(ChannelMsg::ExtendedData { data, .. }) => (io.events)(Event::Output(data.to_vec())),
                 Some(ChannelMsg::ExitStatus { exit_status }) => {
                     io.log(format!("Session sent command exit status {exit_status}"));
+                    (io.events)(Event::ExitStatus(exit_status));
                     status = Some(exit_status);
                 }
                 Some(ChannelMsg::Close) | None => break match status {

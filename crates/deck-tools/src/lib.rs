@@ -294,8 +294,10 @@ pub fn host_keys() -> Arc<dyn HostKeyStore> {
     Arc::new(RegistryStore)
 }
 
-/// Runs a session on the console. Returns why it ended.
-pub async fn run_console(target: Target) -> anyhow::Result<String> {
+/// Runs a session on the console. Returns why it ended, and the exit code
+/// Plink gives, as PuTTY's: the remote command's, or for a session with none,
+/// 0 if it ended normally and 1 if not.
+pub async fn run_console(target: Target) -> anyhow::Result<(String, i32)> {
     let (etx, mut erx) = unbounded_channel();
     let sink: EventSink = Arc::new(move |e| {
         let _ = etx.send(e);
@@ -307,6 +309,7 @@ pub async fn run_console(target: Target) -> anyhow::Result<String> {
     let tx = session::spawn(&tokio::runtime::Handle::current(), target, host_keys(), console_size(), sink);
     pump_stdin(tx.clone(), keep);
     let mut out = std::io::stdout();
+    let mut status = None;
     let reason = loop {
         match erx.recv().await {
             Some(Event::Output(b)) => {
@@ -325,8 +328,9 @@ pub async fn run_console(target: Target) -> anyhow::Result<String> {
                     eprintln!("{line}");
                 }
             }
-            Some(Event::Closed(why, _)) => break why,
-            None => break "The session ended.".to_string(),
+            Some(Event::ExitStatus(n)) => status = Some(n as i32),
+            Some(Event::Closed(why, clean)) => break (why, status.unwrap_or(if clean { 0 } else { 1 })),
+            None => break ("The session ended.".to_string(), status.unwrap_or(1)),
         }
     };
     drop(raw);
