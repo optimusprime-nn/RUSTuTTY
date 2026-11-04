@@ -212,10 +212,10 @@ pub const OPTIONS: &[Option_] = &[
 /// Acted on, with no entry in `OPTIONS`. The proxy password is typed when needed,
 /// or kept as saved, and the settings window's masked box edits it. SSH logs hold no passwords
 /// or packets, so the `SSHLogOmit` settings are always met.
-pub const AUTOMATIC: &[&str] = &["ProxyPassword", "PingInterval", "ProxyLogToTerm", "Present", "SSHLogOmitData", "SSHLogOmitPasswords", "NoRemoteResize", "WinNameAlways"];
+pub const AUTOMATIC: &[&str] = &["ProxyPassword", "PingInterval", "ProxyLogToTerm", "Present", "SSHLogOmitData", "SSHLogOmitPasswords", "NoRemoteResize", "WinNameAlways", "BCE", "BlinkText", "CJKAmbigWide", "UTF8linedraw"];
 
 /// Settings for things that don't exist on Windows or in a Unicode terminal.
-pub const NOT_APPLICABLE: &[&str] = &["OSXCommandMeta", "OSXOptionMeta", "LoginShell", "StampUtmp", "WindowClass", "TryPalette", "AuthTIS", "RawCNP", "FontVTMode"];
+pub const NOT_APPLICABLE: &[&str] = &["OSXCommandMeta", "OSXOptionMeta", "LoginShell", "StampUtmp", "WindowClass", "TryPalette", "AuthTIS", "RawCNP", "FontVTMode", "UTF8Override"];
 
 /// PuTTY settings the deck keeps but doesn't act on, and why.
 pub const NOT_DONE: &[(&str, &[&str])] = &[
@@ -223,7 +223,7 @@ pub const NOT_DONE: &[(&str, &[&str])] = &[
     ("Single DES, which russh doesn't have", &["SSH2DES"]),
     ("Workarounds for old servers: russh decides these itself", &["BugChanReq", "BugDeriveKey2", "BugDropStart", "BugFilterKexinit", "BugHMAC2", "BugIgnore1", "BugIgnore2", "BugMaxPkt2", "BugOldGex2", "BugPKSessID2", "BugPlainPW1", "BugRSA1", "BugRSAPad2", "BugRSASHA2CertUserauth", "BugRekey2", "BugWinadj"]),
     ("SSH-1, which russh doesn't have", &["SshProt"]),
-    ("alacritty_terminal has no way to do these", &["BCE", "BlinkText", "CJKAmbigWide", "DisableArabicShaping", "DisableBidi", "UTF8Override", "UTF8linedraw"]),
+    ("Right-to-left text isn't laid out yet", &["DisableArabicShaping", "DisableBidi"]),
     ("The deck always keeps its own Ctrl+Shift+C and V", &["CtrlShiftCV"]),
 ];
 

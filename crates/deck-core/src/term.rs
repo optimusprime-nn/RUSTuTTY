@@ -77,6 +77,16 @@ impl Palette {
         }
     }
 
+    /// The background a blinking cell gets with `BlinkText` off: the bright
+    /// version of one of the eight colours, as PuTTY's, or as it was.
+    fn brighter_background(&self, c: Color, now: Rgb, host: &Colors) -> Rgb {
+        match c {
+            Color::Indexed(i) if i < 8 => self.entry(i + 8, host),
+            Color::Named(n) if (n as usize) < 8 => self.entry(n as u8 + 8, host),
+            _ => now,
+        }
+    }
+
     /// A palette entry, or the colour the host gave it with OSC 4 (or Linux's
     /// OSC P), as PuTTY lets a host change its palette.
     fn entry(&self, i: u8, host: &Colors) -> Rgb {
@@ -140,6 +150,8 @@ pub struct RenderCell {
     pub bold: bool,
     pub underline: bool,
     pub strike: bool,
+    /// Blinking text, with `BlinkText` on: drawn, then hidden, in turn.
+    pub blink: bool,
     pub wide: bool,
 }
 
@@ -268,6 +280,8 @@ pub struct Terminal {
     kind: SelectionType,
     palette: Palette,
     mouse_reports: bool,
+    /// `BlinkText`: blinking text blinks.
+    blink_text: bool,
     bracketed_paste: bool,
     /// The session's starting modes, put back by a reset.
     start: Vec<u8>,
@@ -280,6 +294,10 @@ pub struct Terminal {
     reverse: Option<std::time::Instant>,
     filter: Filter,
     decoder: Option<Decoder>,
+    /// The session's own character set, which `ESC % @` returns to.
+    codepage: &'static Encoding,
+    /// The start of an escape at the end of the last output, kept for the next.
+    raw_tail: Vec<u8>,
     encoder: Option<Encoder>,
     title: String,
     scroll_on_output: bool,
@@ -313,7 +331,7 @@ fn clean_title(t: &str) -> String {
 /// `LineCodePage` is PuTTY's description of a character set, such as
 /// "ISO-8859-1:1998 (Latin-1, West Europe)" or "Win1252 (Western)". Anything
 /// not recognised is treated as UTF-8.
-fn line_encoding(name: &str) -> &'static Encoding {
+pub(crate) fn line_encoding(name: &str) -> &'static Encoding {
     let label = name.split([':', ' ']).next().unwrap_or("").to_lowercase();
     let label = match label.strip_prefix("win") {
         Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit()) => format!("windows-{rest}"),
@@ -379,6 +397,8 @@ impl Terminal {
             // A remote host must not be able to touch the clipboard.
             osc52: Osc52::Disabled,
             default_cursor_style: cursor_style(s),
+            bce: s.b("BCE", true),
+            cjk_ambiguous_wide: s.b("CJKAmbigWide", false),
             semantic_escape_chars: word_breaks(s),
             ..Config::default()
         }
@@ -392,6 +412,7 @@ impl Terminal {
         self.filter.set_config(FilterConfig::new(s));
         let encoding = line_encoding(&s.s("LineCodePage", ""));
         let now = self.encoder.as_ref().map_or(UTF_8, |e| e.encoding());
+        self.codepage = encoding;
         if encoding != now {
             self.decoder = (encoding != UTF_8).then(|| encoding.new_decoder_without_bom_handling());
             self.encoder = (encoding != UTF_8).then(|| encoding.new_encoder());
@@ -406,6 +427,7 @@ impl Terminal {
         self.rect_select = s.b("RectSelect", false);
         self.palette = Palette::from_settings(s);
         self.mouse_reports = !s.b("NoMouseReporting", false);
+        self.blink_text = s.b("BlinkText", false);
         self.bracketed_paste = !s.b("DisableBracketedPaste", false);
     }
 
@@ -419,6 +441,8 @@ impl Terminal {
             filter: Filter::new(FilterConfig::new(s)),
             decoder: (encoding != UTF_8).then(|| encoding.new_decoder_without_bom_handling()),
             encoder: (encoding != UTF_8).then(|| encoding.new_encoder()),
+            codepage: encoding,
+            raw_tail: Vec::new(),
             title: s.s("WinTitle", ""),
             remote_title: !s.b("NoRemoteWinTitle", false),
             urxvt_mouse: false,
@@ -433,6 +457,7 @@ impl Terminal {
             kind: SelectionType::Simple,
             palette: Palette::from_settings(s),
             mouse_reports: !s.b("NoMouseReporting", false),
+            blink_text: s.b("BlinkText", false),
             bracketed_paste: !s.b("DisableBracketedPaste", false),
             start: Vec::new(),
         };
@@ -492,7 +517,30 @@ impl Terminal {
         self.parser.advance(&mut self.term, &self.start);
     }
 
+    /// What the host sent. `ESC % G` and `ESC % @` switch to UTF-8 and back
+    /// to the session's character set, as in PuTTY; they come before the
+    /// bytes are decoded, so they're found here.
     pub fn feed(&mut self, bytes: &[u8]) {
+        let mut data = std::mem::take(&mut self.raw_tail);
+        data.extend_from_slice(bytes);
+        // an escape cut off at the end waits for the rest
+        let keep = if data.ends_with(b"\x1b%") { 2 } else if data.ends_with(b"\x1b") { 1 } else { 0 };
+        self.raw_tail = data.split_off(data.len() - keep);
+        let mut rest = &data[..];
+        while let Some(at) = rest.windows(3).position(|w| w[0] == 0x1b && w[1] == b'%' && matches!(w[2], b'G' | b'@')) {
+            self.feed_decoded(&rest[..at]);
+            let encoding = if rest[at + 2] == b'G' { UTF_8 } else { self.codepage };
+            self.decoder = (encoding != UTF_8).then(|| encoding.new_decoder_without_bom_handling());
+            self.encoder = (encoding != UTF_8).then(|| encoding.new_encoder());
+            rest = &rest[at + 3..];
+        }
+        self.feed_decoded(rest);
+    }
+
+    fn feed_decoded(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
         let decoded;
         let bytes = match &mut self.decoder {
             Some(d) => {
@@ -896,7 +944,7 @@ impl Terminal {
         // DECSCNM turns every cell about, blank ones too
         let reverse = self.reverse.is_some();
         let (blank_fg, blank_bg) = if reverse { (p.bg, p.fg) } else { (p.fg, p.bg) };
-        let blank = RenderCell { c: ' ', marks: ['\0'; MARKS], fg: blank_fg, bg: blank_bg, bold: false, underline: false, strike: false, wide: false };
+        let blank = RenderCell { c: ' ', marks: ['\0'; MARKS], fg: blank_fg, bg: blank_bg, bold: false, underline: false, strike: false, blink: false, wide: false };
         let mut rows = vec![vec![blank; cols]; lines];
         let offset = content.display_offset as i32;
         let selection = content.selection;
@@ -908,6 +956,12 @@ impl Terminal {
             let bold = cell.flags.contains(Flags::BOLD);
             let mut fg = p.resolve(cell.fg, bold, if bold { p.bold_fg } else { p.fg }, content.colors);
             let mut bg = p.resolve(cell.bg, false, p.bg, content.colors);
+            // blinking text with BlinkText off has a bright background, as
+            // PuTTY shows it
+            let blink = cell.flags.contains(Flags::BLINK);
+            if blink && !self.blink_text {
+                bg = p.brighter_background(cell.bg, bg, content.colors);
+            }
             if cell.flags.contains(Flags::DIM) {
                 fg = (fg.0 / 3 * 2, fg.1 / 3 * 2, fg.2 / 3 * 2);
             }
@@ -932,6 +986,7 @@ impl Terminal {
                     bold,
                     underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
                     strike: cell.flags.contains(Flags::STRIKEOUT),
+                    blink: blink && self.blink_text,
                     wide: cell.flags.contains(Flags::WIDE_CHAR),
                 };
             }
@@ -1077,6 +1132,69 @@ mod tests {
     fn paste_keeps_backspace_and_delete() {
         let mut t = Terminal::new(20, 3);
         assert_eq!(t.paste_bytes("a\x08b\x7fc\x01d"), b"a\x08b\x7fcd");
+    }
+
+    fn settings_of(pairs: &[(&str, Value)]) -> Settings {
+        let mut s = Settings::default();
+        for (k, v) in pairs {
+            s.set(k, v.clone());
+        }
+        s
+    }
+
+    #[test]
+    fn background_colour_erase_can_be_turned_off() {
+        let mut on = Terminal::new(10, 3);
+        on.feed(b"\x1b[44m\x1b[2J\r\n\n\n\n");
+        let blue = on.screen().rows[0][5].bg;
+        assert_ne!(blue, on.palette().bg, "BCE on: cleared cells take the colour");
+        let mut off = Terminal::with_settings(10, 3, &settings_of(&[("BCE", Value::Int(0))]));
+        let plain = off.screen().rows[0][5].bg;
+        off.feed(b"\x1b[44m\x1b[2J\x1b[K\r\n\n\n\n");
+        let screen = off.screen();
+        assert!(screen.rows.iter().all(|r| r.iter().all(|c| c.bg == plain)), "BCE off: cleared and scrolled-in cells stay plain");
+    }
+
+    #[test]
+    fn blinking_text_blinks_or_brightens() {
+        let mut real = Terminal::with_settings(10, 2, &settings_of(&[("BlinkText", Value::Int(1))]));
+        real.feed(b"\x1b[5mb\x1b[25mn");
+        let row = &real.screen().rows[0];
+        assert!(row[0].blink && !row[1].blink);
+        let mut not = Terminal::new(10, 2);
+        not.feed(b"\x1b[41mx\x1b[5my");
+        let row = &not.screen().rows[0];
+        assert!(!row[1].blink, "BlinkText off: no blinking");
+        assert_ne!(row[0].bg, row[1].bg, "but a brighter background, as PuTTY");
+    }
+
+    #[test]
+    fn ambiguous_width_characters_can_be_wide() {
+        let mut narrow = Terminal::new(10, 2);
+        narrow.feed("\u{b1}x".as_bytes());
+        assert_eq!(narrow.row_text(0).trim_end(), "\u{b1}x");
+        let mut wide = Terminal::with_settings(10, 2, &settings_of(&[("CJKAmbigWide", Value::Int(1))]));
+        wide.feed("\u{b1}x".as_bytes());
+        assert!(wide.screen().rows[0][0].wide, "± takes two cells");
+    }
+
+    #[test]
+    fn line_drawing_in_utf8_needs_its_setting() {
+        let mut plain = Terminal::new(10, 2);
+        plain.feed(b"\x1b(0q\x1b(B");
+        assert_eq!(plain.row_text(0).trim_end(), "q", "ignored in UTF-8, as PuTTY");
+        let mut drawn = Terminal::with_settings(10, 2, &settings_of(&[("UTF8linedraw", Value::Int(1))]));
+        drawn.feed(b"\x1b(0q\x1b(B");
+        assert_eq!(drawn.row_text(0).trim_end(), "\u{2500}");
+    }
+
+    #[test]
+    fn esc_percent_switches_to_utf8_and_back() {
+        let mut t = Terminal::with_settings(20, 2, &settings_of(&[("LineCodePage", Value::Str("ISO-8859-1".into()))]));
+        t.feed(b"\xe9");
+        t.feed(b"\x1b%");
+        t.feed(b"G\xc3\xa9\x1b%@\xe9");
+        assert_eq!(t.row_text(0).trim_end(), "\u{e9}\u{e9}\u{e9}", "Latin-1, then UTF-8, then Latin-1 again, even split up");
     }
 
     #[test]

@@ -21,6 +21,8 @@ pub struct FilterConfig {
     title_query: u32,
     /// With no printer set, a host's requests to print are ignored.
     printer: bool,
+    /// UTF-8 without `UTF8linedraw`: VT100 line drawing is ignored, as PuTTY does.
+    no_linedraw: bool,
 }
 
 impl FilterConfig {
@@ -39,6 +41,8 @@ impl FilterConfig {
             answerback: ctrl_parse(&s.s("Answerback", "PuTTY")),
             title_query: s.i("RemoteQTitleAction", 1),
             printer: !s.s("Printer", "").is_empty(),
+            // in UTF-8, PuTTY ignores VT100 line drawing unless told not to
+            no_linedraw: crate::term::line_encoding(&s.s("LineCodePage", "")) == encoding_rs::UTF_8 && !s.b("UTF8linedraw", false),
         }
     }
 }
@@ -471,7 +475,12 @@ impl Filter {
                 State::Designate(which) => {
                     let g = b"()*+".iter().position(|&c| c == which).unwrap_or(0);
                     self.charsets.sets[g] = b;
-                    out.extend([0x1b, which, if matches!(b, b'A' | b'U') { b'B' } else { b }]);
+                    let shown = match b {
+                        b'A' | b'U' => b'B',
+                        b'0' if self.config.no_linedraw => b'B',
+                        b => b,
+                    };
+                    out.extend([0x1b, which, shown]);
                     State::Ground
                 }
                 State::ScoLead(lead) if (0x80..=0xbf).contains(&b) => {

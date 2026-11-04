@@ -22,9 +22,8 @@ These can't be done with the libraries RUSTuTTY is built on:
   connected over SSH-2.
 - **Workarounds for old servers' bugs.** russh makes those choices itself, and
   may refuse very old servers.
-- **Background colour erase, blinking text, right-to-left text, and PuTTY's
-  double-width and line-drawing options.** alacritty_terminal, the terminal
-  library, has no way to do them.
+- **Right-to-left text.** Arabic and Hebrew aren't yet laid out right to left
+  or shaped.
 
 The tools differ too:
 

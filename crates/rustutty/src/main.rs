@@ -198,6 +198,8 @@ struct Deck {
     focused: bool,
     started: std::time::Instant,
     cursor_off: bool,
+    /// Blinking text is in its hidden half.
+    text_blink_off: bool,
     flash: bool,
     pointer_hidden: bool,
     compose_state: u8,
@@ -1845,10 +1847,19 @@ impl Deck {
             }
             self.flash = false;
             self.redraw();
-        } else if self.current().is_some_and(|s| s.term.cursor_style().1) {
-            self.cursor_off = !self.cursor_off;
-            unsafe {
-                let _ = InvalidateRect(Some(self.content), None, false);
+        } else {
+            // the cursor's blink, and blinking text's with BlinkText on
+            let (cursor, text) = self.current().map_or((false, false), |s| (s.term.cursor_style().1, s.target.settings.b("BlinkText", false)));
+            if cursor {
+                self.cursor_off = !self.cursor_off;
+            }
+            if text {
+                self.text_blink_off = !self.text_blink_off;
+            }
+            if cursor || text {
+                unsafe {
+                    let _ = InvalidateRect(Some(self.content), None, false);
+                }
             }
         }
     }
@@ -2255,7 +2266,7 @@ impl Deck {
                     let first = row[x];
                     let mut end = x;
                     let (mut text, mut dx) = (Vec::with_capacity(row.len()), Vec::with_capacity(row.len()));
-                    let style = |c: &deck_core::term::RenderCell| (c.fg, c.bg, c.bold, c.underline, c.strike, c.wide);
+                    let style = |c: &deck_core::term::RenderCell| (c.fg, c.bg, c.bold, c.underline, c.strike, c.blink, c.wide);
                     // the blank half of a wide character stays with it
                     while end < row.len() && (style(&row[end]) == style(&first) || (end > x && row[end - 1].wide)) {
                         let c = if row[end].c == '\0' { ' ' } else { row[end].c };
@@ -2283,7 +2294,8 @@ impl Deck {
                     };
                     SelectObject(dc, face.into());
                     SetBkColor(dc, rgb(first.bg));
-                    SetTextColor(dc, rgb(first.fg));
+                    // blinking text, in its off half, is drawn in its background
+                    SetTextColor(dc, rgb(if first.blink && self.text_blink_off { first.bg } else { first.fg }));
                     let r = RECT { left: x as i32 * cw + origin, top: y, right: end as i32 * cw + origin, bottom: y + ch };
                     let _ = ExtTextOutW(dc, r.left, y, ETO_OPAQUE | ETO_CLIPPED, Some(&r), PCWSTR(text.as_ptr()), text.len() as u32, Some(dx.as_ptr()));
                     if first.bold && bold_font && shadow {
@@ -2738,7 +2750,7 @@ fn main() {
             sessions: Vec::new(), active: None, next_id: 1, saved,
             inbox: Default::default(), rt, store,
             skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), clicks: (std::time::Instant::now(), 0, LPARAM(0)), wheel: 0, hwheel: 0, last_move: None, key_repeat: false, caret: (0, 0), composing: false, event_log: None, size_tip: None, fitted_px: None, focused: false,
-            started: std::time::Instant::now(), cursor_off: false, flash: false, pointer_hidden: false, compose_state: 0, compose_first: 0, full_screen: None, close_held: None, system_items: 0,
+            started: std::time::Instant::now(), cursor_off: false, text_blink_off: false, flash: false, pointer_hidden: false, compose_state: 0, compose_first: 0, full_screen: None, close_held: None, system_items: 0,
         }));
         DECK.store(d, Ordering::Release);
         let d = &mut *d;

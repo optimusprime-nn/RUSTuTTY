@@ -25,7 +25,10 @@ def shipped(metadata):
         for dep in nodes[id]["deps"]:
             if any(k["kind"] is None for k in dep["dep_kinds"]):
                 todo.append(dep["pkg"])
-    return sorted((packages[i] for i in seen if packages[i]["source"]), key=lambda p: (p["name"], p["version"]))
+    # everything but RUSTuTTY's own crates, including the copy of
+    # alacritty_terminal kept in vendor/, which has no registry source
+    ours = set(metadata["workspace_members"])
+    return sorted((packages[i] for i in seen if i not in ours), key=lambda p: (p["name"], p["version"]))
 
 
 def main():
