@@ -27,8 +27,6 @@ The tools differ too:
 
 - `puttygen` is command line only. There's no key generator window.
 - `pageant` runs in a console with no tray icon.
-- The Rlogin window size is sent without waiting for the server's urgent
-  request.
 - **Help** opens this documentation in your browser, rather than a help file.
 
 ## Different on purpose, for safety

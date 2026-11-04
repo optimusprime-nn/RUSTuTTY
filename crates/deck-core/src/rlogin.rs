@@ -23,7 +23,14 @@ fn window_size(cols: u32, rows: u32) -> [u8; 12] {
     [0xff, 0xff, b's', b's', r1, r0, c1, c0, 0, 0, 0, 0]
 }
 
-pub(crate) async fn run(target: &Target, mut conn: Conn, mut io: Io) -> anyhow::Result<String> {
+/// How often to look for the server's urgent request for the window size.
+const URGENT_EVERY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The server asks for the window size with an urgent byte that has 0x80 set,
+/// and PuTTY sends it only then, as RFC 1282 says. `urgent` is the socket to
+/// read that byte from; through a proxy there's none, and the size goes as
+/// soon as the server answers the login instead.
+pub(crate) async fn run(target: &Target, mut conn: Conn, urgent: Option<socket2::Socket>, mut io: Io) -> anyhow::Result<String> {
     let s = &target.settings;
     let local = s.s("LocalUserName", "");
     let local = if local.is_empty() { std::env::var("USERNAME").unwrap_or_default() } else { local };
@@ -38,8 +45,22 @@ pub(crate) async fn run(target: &Target, mut conn: Conn, mut io: Io) -> anyhow::
     io.logged_in();
     let mut first = true;
     let mut buf = [0u8; 8192];
+    // whether the server has asked for the window size
+    let mut can_size = false;
+    let mut look = tokio::time::interval(URGENT_EVERY);
     loop {
         tokio::select! {
+            _ = look.tick(), if urgent.is_some() => {
+                let mut byte = [std::mem::MaybeUninit::<u8>::uninit()];
+                if let Some(Ok(1)) = urgent.as_ref().map(|s| s.recv_out_of_band(&mut byte)) {
+                    // SAFETY: recv_out_of_band filled the one byte it said it did
+                    let b = unsafe { byte[0].assume_init() };
+                    if b & 0x80 != 0 {
+                        can_size = true;
+                        conn.write_all(&window_size(io.cols, io.rows)).await?;
+                    }
+                }
+            }
             n = conn.read(&mut buf) => {
                 let n = n?;
                 if n == 0 {
@@ -52,7 +73,11 @@ pub(crate) async fn run(target: &Target, mut conn: Conn, mut io: Io) -> anyhow::
                     if data[0] == 0 {
                         data = &data[1..];
                     }
-                    conn.write_all(&window_size(io.cols, io.rows)).await?;
+                    // with no way to hear the request, the size goes now
+                    if urgent.is_none() {
+                        can_size = true;
+                        conn.write_all(&window_size(io.cols, io.rows)).await?;
+                    }
                 }
                 if !data.is_empty() {
                     (io.events)(Event::Output(data.to_vec()));
@@ -65,7 +90,7 @@ pub(crate) async fn run(target: &Target, mut conn: Conn, mut io: Io) -> anyhow::
                 Some(Command::Input(b)) => conn.write_all(&b).await?,
                 Some(Command::Resize { cols, rows }) => {
                     (io.cols, io.rows) = (cols, rows);
-                    if !first {
+                    if can_size {
                         conn.write_all(&window_size(cols, rows)).await?;
                     }
                 }

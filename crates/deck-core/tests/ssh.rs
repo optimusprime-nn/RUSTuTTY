@@ -959,3 +959,29 @@ async fn keepalives_follow_a_change_of_settings() {
     .await;
     assert_eq!(nop, Ok(true), "a NOP within a few seconds");
 }
+
+/// The Rlogin window size waits for the server's urgent request, as PuTTY's
+/// does, rather than going as soon as the login is answered.
+#[tokio::test(flavor = "multi_thread")]
+async fn rlogin_sends_its_size_when_asked() {
+    let l = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut s, _) = l.accept().await.unwrap();
+        let mut b = [0u8; 256];
+        let _ = s.read(&mut b).await.unwrap();
+        s.write_all(b"\0hello\r\n").await.unwrap();
+        // nothing yet: the server hasn't asked
+        let early = tokio::time::timeout(Duration::from_millis(600), s.read(&mut b)).await.is_ok();
+        socket2::SockRef::from(&s).send_out_of_band(&[0x80]).unwrap();
+        let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut b)).await.expect("the size, once asked").unwrap();
+        (early, b[..n].to_vec())
+    });
+    let mut target = Target::new(Protocol::Rlogin, "127.0.0.1", port);
+    target.user = Some("me".to_string());
+    let mut c = Client::open_target(target, Arc::new(MemoryStore::default()));
+    c.expect("hello").await;
+    let (early, size) = server.await.unwrap();
+    assert!(!early, "the size didn't go before it was asked for");
+    assert_eq!(&size[..4], &[0xff, 0xff, b's', b's'], "{size:?}");
+}

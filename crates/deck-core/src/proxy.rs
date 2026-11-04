@@ -465,6 +465,13 @@ async fn pre_connect(target: &Target, io: &Arc<Mutex<Io>>) -> anyhow::Result<()>
 
 /// Connects to `target`, going through its proxy if it has one that applies.
 pub(crate) async fn connect(target: &Target, store: &Arc<dyn HostKeyStore>, io: &Arc<Mutex<Io>>) -> anyhow::Result<Conn> {
+    Ok(connect_direct(target, store, io).await?.0)
+}
+
+/// As `connect`, and for a direct connection, a second handle on its socket,
+/// for reading TCP's urgent data, which Rlogin's server uses to ask for the
+/// window size. A connection through a proxy has none.
+pub(crate) async fn connect_direct(target: &Target, store: &Arc<dyn HostKeyStore>, io: &Arc<Mutex<Io>>) -> anyhow::Result<(Conn, Option<socket2::Socket>)> {
     let s = &target.settings;
     pre_connect(target, io).await?;
     let method = s.i("ProxyMethod", 0);
@@ -477,8 +484,15 @@ pub(crate) async fn connect(target: &Target, store: &Arc<dyn HostKeyStore>, io: 
         if let Ok(peer) = c.peer_addr() {
             io.lock().await.log(format!("Connected to {peer}"));
         }
-        return Ok(Box::new(c));
+        let urgent = socket2::SockRef::from(&c).try_clone().ok();
+        return Ok((Box::new(c), urgent));
     }
+    Ok((through_proxy(target, store, io, method).await?, None))
+}
+
+/// Connects through the session's proxy.
+async fn through_proxy(target: &Target, store: &Arc<dyn HostKeyStore>, io: &Arc<Mutex<Io>>, method: u32) -> anyhow::Result<Conn> {
+    let s = &target.settings;
     let kind = match method {
         SOCKS4 => "SOCKS 4",
         SOCKS5 => "SOCKS 5",

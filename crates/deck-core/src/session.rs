@@ -274,8 +274,10 @@ async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -> anyhow::R
         Protocol::Rlogin => {
             let mut privileged = target.clone();
             privileged.settings.set(crate::proxy::PRIVILEGED, crate::settings::Value::Int(1));
-            let (conn, io) = connect(&privileged, &store, io).await?;
-            crate::rlogin::run(target, conn, io).await
+            let io = Arc::new(Mutex::new(io));
+            let (conn, urgent) = crate::proxy::connect_direct(&privileged, &store, &io).await?;
+            let io = Arc::into_inner(io).ok_or_else(|| anyhow::anyhow!("The session is still in use."))?.into_inner();
+            crate::rlogin::run(target, conn, urgent, io).await
         }
         Protocol::Supdup => {
             let (conn, io) = connect(target, &store, io).await?;
