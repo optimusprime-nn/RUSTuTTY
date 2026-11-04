@@ -12,7 +12,7 @@ use deck_core::filter::BellLimit;
 use deck_core::keys::{shortcut, Key, KeyConfig, Mods, Shortcut};
 use deck_core::session::{self, Command, Event};
 use deck_core::settings::{Settings, Value};
-use deck_core::term::{rtf, CursorKind, TermEvent, Terminal};
+use deck_core::term::{rtf, rtf_styled, CursorKind, TermEvent, Terminal};
 use settings_window::Outcome;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
@@ -316,11 +316,16 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// Copies text, as rich text too if the session's `PasteRTF` asks for it.
-fn copy_out(s: &Settings, text: &str) {
+/// Puts text on the clipboard, with rich text too if `PasteRTF` asks: the
+/// selection's colours and styles when there are any, as PuTTY copies them.
+fn copy_out(s: &Settings, term: Option<&Terminal>, text: &str) {
     if s.b("PasteRTF", false) {
         let font = s.s("Font", "");
         let font = if font.is_empty() { "Consolas" } else { &font };
-        clipboard::set_with_rtf(text, &rtf(text, font, s.i("FontHeight", 10)));
+        let points = s.i("FontHeight", 10);
+        let runs = term.map(Terminal::selected_styled).unwrap_or_default();
+        let rich = if runs.is_empty() { rtf(text, font, points) } else { rtf_styled(&runs, font, points) };
+        clipboard::set_with_rtf(text, &rich);
     } else {
         clipboard::set(text);
     }
@@ -1342,7 +1347,7 @@ impl Deck {
     fn copy(&mut self) {
         if let Some(s) = self.current() {
             if let Some(text) = s.term.selected_text() {
-                copy_out(&s.target.settings, &text);
+                copy_out(&s.target.settings, Some(&s.term), &text);
             }
         }
         self.redraw();
@@ -1352,7 +1357,7 @@ impl Deck {
         if let Some(s) = self.current() {
             {
                 let text = s.term.all_text();
-                copy_out(&s.target.settings, &text);
+                copy_out(&s.target.settings, None, &text);
             }
         }
     }
@@ -1700,7 +1705,7 @@ impl Deck {
         let auto = self.autocopy();
         if let Some(s) = self.current() {
             if let (true, Some(text)) = (auto, s.term.selected_text()) {
-                copy_out(&s.target.settings, &text);
+                copy_out(&s.target.settings, Some(&s.term), &text);
             }
         }
     }

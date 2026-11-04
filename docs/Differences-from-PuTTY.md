@@ -67,5 +67,4 @@ The tools differ too:
 - Connection sharing works between sessions in one RUSTuTTY. It can't join a
   connection held by a separate PuTTY, and forwardings on a joining session
   aren't set up.
-- Copying as rich text keeps the text and font, not its colours.
 - Resizing a session can't change its font.

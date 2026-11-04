@@ -198,6 +198,43 @@ pub fn rtf(text: &str, font: &str, points: u32) -> String {
     out
 }
 
+/// A run of selected text in one look, for rich-text copying.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Styled {
+    pub text: String,
+    pub fg: Rgb,
+    pub bg: Rgb,
+    pub bold: bool,
+    pub underline: bool,
+}
+
+/// `PasteRTF` with the selection's colours, bold and underline, as PuTTY
+/// writes it: a colour table, then `\cf` for text and `\highlight` for the
+/// background.
+pub fn rtf_styled(runs: &[Styled], font: &str, points: u32) -> String {
+    let mut colours: Vec<Rgb> = Vec::new();
+    let mut index = |c: Rgb| match colours.iter().position(|&k| k == c) {
+        Some(i) => i + 1,
+        None => {
+            colours.push(c);
+            colours.len()
+        }
+    };
+    let mut body = String::new();
+    for r in runs {
+        let (f, b) = (index(r.fg), index(r.bg));
+        body += &format!("{{\\cf{f}\\highlight{b}\\chcbpat{b}{}{} ", if r.bold { "\\b" } else { "" }, if r.underline { "\\ul" } else { "" });
+        // the text as plain rtf() writes it, without its own header
+        let plain = rtf(&r.text, "", 0);
+        let inner = plain.split_once("\\fs0 ").map_or("", |(_, rest)| rest);
+        body += inner.strip_suffix('}').unwrap_or(inner);
+        body.push('}');
+    }
+    let table: String = colours.iter().map(|c| format!("\\red{}\\green{}\\blue{};", c.0, c.1, c.2)).collect();
+    let safe_font: String = font.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').collect();
+    format!("{{\\rtf1\\ansi\\deff0{{\\fonttbl{{\\f0\\fmodern {safe_font};}}}}{{\\colortbl ;{table}}}\\f0\\fs{} {body}}}", points * 2)
+}
+
 /// A host asking what colour a palette entry is, and how to word the answer.
 type ColourQuery = (usize, Arc<dyn Fn(alacritty_terminal::vte::ansi::Rgb) -> String + Send + Sync>);
 
@@ -736,6 +773,58 @@ impl Terminal {
         self.term.selection = None;
     }
 
+    /// The selection as runs of text in one look, for rich-text copying, as
+    /// PuTTY's: colours, bold and underline. Lines end where the screen's do,
+    /// not where a long line wrapped, and trailing blanks go, as in plain
+    /// copying.
+    pub fn selected_styled(&self) -> Vec<Styled> {
+        let Some(range) = self.term.selection.as_ref().and_then(|s| s.to_range(&self.term)) else { return Vec::new() };
+        let grid = self.term.grid();
+        let p = &self.palette;
+        let colors = self.term.colors();
+        let last = self.term.columns() - 1;
+        let mut runs: Vec<Styled> = Vec::new();
+        let mut push = |text: &str, fg: Rgb, bg: Rgb, bold: bool, underline: bool| match runs.last_mut() {
+            Some(r) if (r.fg, r.bg, r.bold, r.underline) == (fg, bg, bold, underline) => r.text.push_str(text),
+            _ => runs.push(Styled { text: text.to_string(), fg, bg, bold, underline }),
+        };
+        for line in range.start.line.0..=range.end.line.0 {
+            let row = &grid[Line(line)];
+            let (from, to) = match (range.is_block, line == range.start.line.0, line == range.end.line.0) {
+                (true, ..) => (range.start.column.0, range.end.column.0),
+                (false, true, true) => (range.start.column.0, range.end.column.0),
+                (false, true, false) => (range.start.column.0, last),
+                (false, false, true) => (0, range.end.column.0),
+                (false, false, false) => (0, last),
+            };
+            // trailing blanks aren't copied, unless the line wraps on
+            let wraps = !range.is_block && line != range.end.line.0 && row[Column(last)].flags.contains(Flags::WRAPLINE);
+            let mut end = to.min(last);
+            while !wraps && end > from && row[Column(end)].c == ' ' {
+                end -= 1;
+            }
+            for col in from..=end {
+                let cell = &row[Column(col)];
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                let bold = cell.flags.contains(Flags::BOLD);
+                let mut fg = p.resolve(cell.fg, bold, if bold { p.bold_fg } else { p.fg }, colors);
+                let mut bg = p.resolve(cell.bg, false, p.bg, colors);
+                if cell.flags.contains(Flags::INVERSE) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let mut text = cell.c.to_string();
+                text.extend(cell.zerowidth().unwrap_or(&[]));
+                push(&text, fg, bg, bold, cell.flags.intersects(Flags::ALL_UNDERLINES));
+            }
+            if line != range.end.line.0 && !wraps {
+                push("\n", p.fg, p.bg, false, false);
+            }
+        }
+        runs
+    }
+
     /// The whole scrollback and screen as text, keeping any selection.
     pub fn all_text(&mut self) -> String {
         let saved = self.term.selection.take();
@@ -988,6 +1077,22 @@ mod tests {
     fn paste_keeps_backspace_and_delete() {
         let mut t = Terminal::new(20, 3);
         assert_eq!(t.paste_bytes("a\x08b\x7fc\x01d"), b"a\x08b\x7fcd");
+    }
+
+    #[test]
+    fn rich_text_copy_keeps_colours_and_styles() {
+        let mut t = Terminal::new(20, 3);
+        t.feed(b"ab\x1b[1;31mcd\x1b[0m   \r\nef");
+        t.select_start(0, 0);
+        t.select_to(1, 1);
+        let runs = t.selected_styled();
+        let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(text, "abcd\nef", "the same text as a plain copy, trailing blanks gone");
+        let red = runs.iter().find(|r| r.text == "cd").expect("a run of its own");
+        assert!(red.bold && red.fg != runs[0].fg);
+        let rtf = rtf_styled(&runs, "Courier New", 10);
+        assert!(rtf.starts_with("{\\rtf1") && rtf.contains("\\colortbl") && rtf.contains("\\b ") && rtf.contains("\\par"), "{rtf}");
+        assert!(rtf.contains("cd}") && rtf.contains("ab}"), "{rtf}");
     }
 
     #[test]
