@@ -96,8 +96,16 @@ Type commands at the `psftp>` prompt, or put them in a file and pass it with
 
 ## PuTTYgen
 
-PuTTYgen here is command line only, like PuTTY's `puttygen` on Linux. There's
-no window.
+Run on its own, or from the Start menu, PuTTYgen opens PuTTY's key generator
+window. Choose the key type and size, press **Generate**, and the public key
+appears ready to paste into a server's `authorized_keys`. Give it a comment and
+a passphrase, then **Save private key** for a `.ppk` file, or **Save public
+key** for an SSH-2 public key file. **Load** reads a PuTTY or OpenSSH key, to
+change its comment or passphrase. **Conversions** exports it as an OpenSSH key.
+`puttygen key.ppk` opens the window with that key loaded.
+
+With options, PuTTYgen works on the command line instead, like PuTTY's
+`puttygen` on Linux:
 
 | To | Run |
 | --- | --- |

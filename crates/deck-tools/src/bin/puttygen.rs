@@ -1,5 +1,6 @@
-//! PuTTYgen: makes and converts keys, on the command line like PuTTY's
-//! `cmdgen`.
+//! PuTTYgen: makes and converts keys. With no options it opens PuTTY's key
+//! generator window (`puttygen key.ppk` opens it with that key loaded); with
+//! options it works on the command line, as PuTTY's `cmdgen` does.
 //!
 //!   puttygen -t ed25519|rsa|ecdsa [-b bits] [-C comment] -o key.ppk
 //!   puttygen key [-P] -o new.ppk          convert, or change the passphrase
@@ -41,7 +42,7 @@ fn load(path: &str) -> anyhow::Result<(PrivateKey, String)> {
     }
 }
 
-fn generate(kind: &str, bits: usize) -> anyhow::Result<PrivateKey> {
+pub(crate) fn generate(kind: &str, bits: usize) -> anyhow::Result<PrivateKey> {
     let algorithm = match (kind, bits) {
         ("ed25519", _) => Algorithm::Ed25519,
         ("rsa", _) => Algorithm::Rsa { hash: None },
@@ -60,7 +61,16 @@ fn generate(kind: &str, bits: usize) -> anyhow::Result<PrivateKey> {
     PrivateKey::random(&mut rand::rng(), algorithm).map_err(|e| anyhow!("{e}"))
 }
 
+#[path = "puttygen/window.rs"]
+mod window;
+
 fn main() -> anyhow::Result<()> {
+    // the window, as PuTTYgen on Windows: no options, or just a key to load
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    if all.iter().all(|a| !a.starts_with('-')) && all.len() <= 1 {
+        window::run(all.first().cloned());
+        return Ok(());
+    }
     let mut args = std::env::args().skip(1);
     let (mut kind, mut bits, mut comment, mut out, mut input) = (None, 0, None, None, None);
     let (mut passphrase, mut public, mut fingerprint, mut format) = (false, false, false, "private".to_string());
@@ -128,7 +138,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// PuTTY's defaults for a new key file.
-fn new_argon() -> anyhow::Result<Argon> {
+pub(crate) fn new_argon() -> anyhow::Result<Argon> {
     let mut salt = vec![0u8; 16];
     ppk::random(&mut salt)?;
     Ok(Argon { flavour: "Argon2id".into(), memory: 8192, passes: 21, parallelism: 1, salt })
