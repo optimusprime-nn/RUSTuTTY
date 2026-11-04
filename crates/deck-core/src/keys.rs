@@ -234,10 +234,10 @@ pub enum Shortcut {
     PassThrough,
 }
 
-/// The same rules as the C PuTTYDeck. Ctrl+C copies only with text selected,
-/// and Ctrl+V leaves full-screen programs alone. `key` is the Windows
-/// virtual-key code, which is the upper-case letter or the digit.
-pub fn shortcut(key: u8, ctrl: bool, shift: bool, has_selection: bool, alt_screen: bool) -> Shortcut {
+/// The deck's own keys, all with Ctrl and Shift. Plain Ctrl+C and Ctrl+V go
+/// to the program, as in PuTTY. `key` is the Windows virtual-key code, which
+/// is the upper-case letter or the digit.
+pub fn shortcut(key: u8, ctrl: bool, shift: bool) -> Shortcut {
     if !ctrl {
         return Shortcut::PassThrough;
     }
@@ -248,8 +248,6 @@ pub fn shortcut(key: u8, ctrl: bool, shift: bool, has_selection: bool, alt_scree
         (b'D', true) => Shortcut::Duplicate,
         (b'W', true) => Shortcut::CloseSession,
         (b'1'..=b'9', true) => Shortcut::GoTo((key - b'1') as usize),
-        (b'C', false) if has_selection => Shortcut::Copy,
-        (b'V', false) if !alt_screen => Shortcut::Paste,
         _ => Shortcut::PassThrough,
     }
 }
@@ -327,24 +325,18 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_only_copies_a_selection() {
-        assert_eq!(shortcut(b'C', true, false, true, false), Shortcut::Copy);
-        assert_eq!(shortcut(b'C', true, false, false, false), Shortcut::PassThrough);
-        assert_eq!(shortcut(b'C', true, true, false, false), Shortcut::Copy);
-    }
-
-    #[test]
-    fn ctrl_v_stays_out_of_full_screen_programs() {
-        assert_eq!(shortcut(b'V', true, false, false, false), Shortcut::Paste);
-        assert_eq!(shortcut(b'V', true, false, false, true), Shortcut::PassThrough);
-        assert_eq!(shortcut(b'V', true, true, false, true), Shortcut::Paste);
+    fn plain_ctrl_c_and_v_go_to_the_program() {
+        assert_eq!(shortcut(b'C', true, false), Shortcut::PassThrough);
+        assert_eq!(shortcut(b'V', true, false), Shortcut::PassThrough);
+        assert_eq!(shortcut(b'C', true, true), Shortcut::Copy);
+        assert_eq!(shortcut(b'V', true, true), Shortcut::Paste);
     }
 
     #[test]
     fn numbered_sessions() {
-        assert_eq!(shortcut(b'1', true, true, false, false), Shortcut::GoTo(0));
-        assert_eq!(shortcut(b'9', true, true, false, false), Shortcut::GoTo(8));
-        assert_eq!(shortcut(b'1', true, false, false, false), Shortcut::PassThrough);
-        assert_eq!(shortcut(b'T', false, true, false, false), Shortcut::PassThrough);
+        assert_eq!(shortcut(b'1', true, true), Shortcut::GoTo(0));
+        assert_eq!(shortcut(b'9', true, true), Shortcut::GoTo(8));
+        assert_eq!(shortcut(b'1', true, false), Shortcut::PassThrough);
+        assert_eq!(shortcut(b'T', false, true), Shortcut::PassThrough);
     }
 }

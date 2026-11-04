@@ -340,7 +340,7 @@ async fn copy_and_paste_rules() {
     p.connected(1).await;
 
     app.set_clip("hello-paste");
-    app.key(b'V', CTRL);
+    app.key(b'V', CTRL | SHIFT);
     p.wait(0, b"hello-paste").await;
 
     p.send(0, b"copy this text");
@@ -349,10 +349,10 @@ async fn copy_and_paste_rules() {
     let d = app.until("selection copied", |d| field(d, "clip=") == "\"this\"").await;
     assert!(d.contains("selection=true"));
 
-    let before = p.received(0).len();
-    app.key(b'C', CTRL);
-    app.until("selection cleared", |d| d.contains("selection=false")).await;
-    assert_eq!(p.received(0).len(), before, "Ctrl+C with a selection sends nothing");
+    app.set_clip("other");
+    app.key(b'C', CTRL | SHIFT);
+    let d = app.until("copied again", |d| field(d, "clip=") == "\"this\"").await;
+    assert!(d.contains("selection=true"), "copying leaves the selection, as in PuTTY");
 
     app.key(VK_LEFT.0 as u8, 0);
     p.wait(0, b"\x1b[D").await;
@@ -369,20 +369,26 @@ async fn copy_and_paste_rules() {
     app.until("copy all", |d| field(d, "clip=").contains("copy this text")).await;
 }
 
+/// As in PuTTY, plain Ctrl+C and Ctrl+V belong to the program: neither
+/// copies nor pastes, even with text selected.
 #[tokio::test(flavor = "multi_thread")]
-async fn ctrl_v_stays_out_of_full_screen_programs() {
+async fn plain_ctrl_c_and_v_go_to_the_program() {
     let p = Peer::start().await;
     let app = App::start(&raw_args(p.port));
     app.until("session", |d| d.contains("sessions=1")).await;
     p.connected(1).await;
+    p.send(0, b"some text");
+    app.sees("row=some text").await;
+    app.drag((0, 0), (3, 0));
+    app.until("selected", |d| field(d, "clip=") == "\"some\"").await;
     app.set_clip("nope");
-    p.send(0, b"\x1b[?1049h");
-    app.until("alt screen", |d| d.contains("alt=true")).await;
+    app.key(b'C', CTRL);
     app.key(b'V', CTRL);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(p.received(0).is_empty(), "Ctrl+V must not paste in a full-screen program");
-    app.key(b'V', CTRL | SHIFT);
-    p.wait(0, b"nope").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let d = app.dump();
+    assert_eq!(field(&d, "clip="), "\"nope\"", "Ctrl+C didn't copy");
+    assert!(d.contains("selection=true"));
+    assert!(!String::from_utf8_lossy(&p.received(0)).contains("nope"), "Ctrl+V didn't paste");
 }
 
 #[tokio::test(flavor = "multi_thread")]

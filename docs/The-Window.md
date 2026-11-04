@@ -27,8 +27,8 @@ When a session ends, it stays in the list so you can read what was on screen.
 | Action | How |
 | --- | --- |
 | Copy | Select with the mouse: it's copied straight away |
-| Copy | `Ctrl+C` while text is selected, `Ctrl+Shift+C`, or the **Copy** button |
-| Paste | Right-click, `Ctrl+V`, `Ctrl+Shift+V`, or the **Paste** button |
+| Copy | `Ctrl+Shift+C`, or the **Copy** button |
+| Paste | Right-click, `Ctrl+Shift+V`, or the **Paste** button |
 | Copy, paste | `Ctrl+Insert`, `Shift+Insert`, as in PuTTY |
 | Copy a whole session's output | The **Copy all** button |
 | Paste into every session | The **Paste to all** button, which asks first |
@@ -36,10 +36,9 @@ When a session ends, it stays in the list so you can read what was on screen.
 The buttons sit at the bottom of the sidebar, with **Settings**, which changes
 the settings of the session you're looking at.
 
-`Ctrl+C` with nothing selected is sent to the host as an interrupt, as you'd
-expect. In full-screen programs such as `vim`, `Ctrl+V` goes to the program, and
-`Ctrl+Shift+V` always pastes. When a program uses the mouse, hold **Shift** to
-select text.
+As in PuTTY, plain `Ctrl+C` and `Ctrl+V` go to the program: `Ctrl+C` interrupts
+and `Ctrl+V` reaches the shell, whether or not text is selected. When a program
+uses the mouse, hold **Shift** to select text.
 
 Pasting anything with a line end asks first, because each line end presses
 Enter. That includes a single command copied with its newline, which would

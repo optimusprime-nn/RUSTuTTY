@@ -1338,18 +1338,9 @@ impl Deck {
 
     /// Copy, as PuTTY's, leaves the selection where it is.
     fn copy(&mut self) {
-        self.copy_then(false);
-    }
-
-    /// Plain Ctrl+C copies and lets the selection go, so the next press
-    /// interrupts the program as usual.
-    fn copy_then(&mut self, clear: bool) {
         if let Some(s) = self.current() {
             if let Some(text) = s.term.selected_text() {
                 copy_out(&s.target.settings, &text);
-                if clear {
-                    s.term.clear_selection();
-                }
             }
         }
         self.redraw();
@@ -1489,10 +1480,9 @@ impl Deck {
                 return true;
             }
         }
-        let (has_sel, alt) = self.current().map_or((false, false), |s| (s.term.has_selection(), s.term.alt_screen()));
-        let action = if vk < 128 { shortcut(vk as u8, ctrl, shift, has_sel, alt) } else { Shortcut::PassThrough };
+        let action = if vk < 128 { shortcut(vk as u8, ctrl, shift) } else { Shortcut::PassThrough };
         match action {
-            Shortcut::Copy => self.copy_then(!shift),
+            Shortcut::Copy => self.copy(),
             Shortcut::Paste => self.paste(),
             Shortcut::NewSession => take_focus(self.edit),
             Shortcut::Duplicate => {

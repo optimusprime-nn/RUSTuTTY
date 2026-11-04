@@ -36,9 +36,9 @@ presses Enter. Untick **Warn before pasting line ends** under Window > Behaviour
 
 ## Ctrl+C or Ctrl+V doesn't do what I expect
 
-`Ctrl+C` copies only when text is selected; otherwise it interrupts. In
-full-screen programs `Ctrl+V` goes to the program; `Ctrl+Shift+V` always
-pastes. See [The window](The-Window.md#copy-and-paste).
+As in PuTTY, plain `Ctrl+C` and `Ctrl+V` go to the program. Copy with
+`Ctrl+Shift+C` or `Ctrl+Insert`, and paste with `Ctrl+Shift+V`, `Shift+Insert`
+or a right-click. See [The window](The-Window.md#copy-and-paste).
 
 ## I can't select text
 
