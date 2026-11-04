@@ -118,11 +118,20 @@ RSA keys must be at least 2048 bits. ECDSA keys are 256, 384 or 521 bits.
 
 ## Pageant
 
-    pageant key.ppk [more keys]
+    pageant [key.ppk ...] [-c command [arguments]]
 
-Pageant asks for each key's passphrase in its console, then keeps the keys
-unlocked for RUSTuTTY, PuTTY, and any other program that uses Pageant. Leave
-the console open while you need them. Closing it, or pressing `Ctrl+C`, forgets
-the keys.
+Pageant keeps your keys unlocked for RUSTuTTY, PuTTY, and any other program
+that uses Pageant, so you type each passphrase once. As PuTTY's does, it sits
+in the notification area. Its menu has:
 
-There's no tray icon. Only programs running as you can use the keys.
+- **View Keys**: the keys held, with their fingerprints and comments, to add
+  to or remove from. Double-clicking the icon opens it too.
+- **Add Key**: pick a key file. An encrypted one asks for its passphrase.
+- **New Session** and **Saved Sessions**: open RUSTuTTY.
+- **Exit**: forgets every key.
+
+Key files on the command line are added as it starts. Running `pageant` with
+keys while it's already running hands them to the one running. `-c` runs a
+command once the keys are in, such as a script that needs them.
+
+Only programs running as you can use the keys.

@@ -3,6 +3,8 @@
 
 pub mod scp;
 
+pub mod gui;
+
 use anyhow::{anyhow, Context};
 use deck_core::config::{load_sessions, Protocol, Target};
 use deck_core::hostkeys::{HostKeyStore, RegistryStore};

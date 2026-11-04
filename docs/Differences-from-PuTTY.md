@@ -26,7 +26,6 @@ These can't be done with the libraries RUSTuTTY is built on:
 The tools differ too:
 
 - `puttygen` is command line only. There's no key generator window.
-- `pageant` runs in a console with no tray icon.
 - **Help** opens this documentation in your browser, rather than a help file.
 
 ## Different on purpose, for safety
