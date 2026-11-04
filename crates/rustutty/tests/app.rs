@@ -654,6 +654,35 @@ $b=New-Object Drawing.Bitmap(($r.c-$r.a),($r.d-$r.b));$g=[Drawing.Graphics]::Fro
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
+/// Run by hand: what PuTTY can show that a plain terminal can't, to look at.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn screenshot_of_puttys_extras() {
+    let path = std::env::var("RUSTUTTY_SHOT").unwrap();
+    let p = Peer::start().await;
+    let app = App::start(&raw_args(p.port));
+    p.connected(1).await;
+    app.resize(1100, 520);
+    app.set(&[("BCE", "1")]);
+    p.send(0, "accents: e\u{301} a\u{300} n\u{303}  \x1b[9mstruck through\x1b[0m  \x1b[5mblinks\x1b[0m  \x1b[1mbold\x1b[0m \x1b[4munder\x1b[0m\r\n".as_bytes());
+    p.send(0, "Hebrew: \u{5e9}\u{5dc}\u{5d5}\u{5dd} (\u{5e2}\u{5d5}\u{5dc}\u{5dd})   Arabic: \u{645}\u{631}\u{62d}\u{628}\u{627}   \u{644}\u{627}\r\n".as_bytes());
+    p.send(0, b"UK set: \x1b(A# costs #5\x1b(B   SCO: \x1b(U\xc3\x89\xc3\x8d\xc2\xbb\x1b(B  \x1b[11m\x01\x02\x03\x04\x05\x06\x1b[10m\r\n");
+    p.send(0, b"\x1b]4;1;rgb:ff/88/00\x07\x1b[31mred, changed by the host to orange\x1b[0m   \x1b[44m blue background \x1b[0m\r\n");
+    app.sees("row=UK set").await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let script = format!(
+        r#"Add-Type -AssemblyName System.Drawing
+Add-Type 'using System;using System.Runtime.InteropServices;public class W{{[DllImport("user32.dll")]public static extern bool PrintWindow(IntPtr h,IntPtr d,uint f);[StructLayout(LayoutKind.Sequential)]public struct R{{public int a,b,c,d;}}[DllImport("user32.dll")]public static extern bool GetWindowRect(IntPtr h,out R r);}}'
+$h=[IntPtr]{}
+$r=New-Object W+R;[void][W]::GetWindowRect($h,[ref]$r)
+$b=New-Object Drawing.Bitmap(($r.c-$r.a),($r.d-$r.b));$g=[Drawing.Graphics]::FromImage($b);$d=$g.GetHdc()
+[void][W]::PrintWindow($h,$d,2);$g.ReleaseHdc($d);$b.Save('{path}',[Drawing.Imaging.ImageFormat]::Png)"#,
+        app.main.0 as isize
+    );
+    let out = Command::new("powershell").args(["-NoProfile", "-Command", &script]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 #[test]
 fn test_build_takes_no_focus() {
     let app = App::start(&[]);

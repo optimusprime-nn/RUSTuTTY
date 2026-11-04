@@ -402,7 +402,10 @@ pub fn run(path: Option<String>) {
             lpszClassName: w!("PuTTYgen"),
             ..Default::default()
         });
-        let Ok(h) = CreateWindowExW(WINDOW_EX_STYLE(0), w!("PuTTYgen"), w!("PuTTY Key Generator"), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, None, Some(menus()), Some(instance), None) else { return };
+        // a test opens it off-screen and in the background, to take a picture
+        let test = std::env::var_os("RUSTUTTY_TEST_OFFSCREEN").is_some();
+        let (x, ex) = if test { (-4000, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) } else { (CW_USEDEFAULT, WINDOW_EX_STYLE(0)) };
+        let Ok(h) = CreateWindowExW(ex, w!("PuTTYgen"), w!("PuTTY Key Generator"), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, CW_USEDEFAULT, 0, 0, None, Some(menus()), Some(instance), None) else { return };
         deck_ui::style_window(h);
         let f = gui::font(h);
         let none = WINDOW_STYLE(0);
@@ -441,7 +444,7 @@ pub fn run(path: Option<String>) {
         type_chosen(h);
         show(h, None, "");
         let _ = SetWindowPos(h, None, 0, 0, gui::px(h, 620), gui::px(h, 600), SWP_NOMOVE | SWP_NOZORDER);
-        let _ = ShowWindow(h, SW_SHOW);
+        let _ = ShowWindow(h, if test { SW_SHOWNOACTIVATE } else { SW_SHOW });
         if let Some(p) = path {
             load_file(h, &p);
         }
