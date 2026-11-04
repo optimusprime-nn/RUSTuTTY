@@ -22,8 +22,6 @@ These can't be done with the libraries RUSTuTTY is built on:
   connected over SSH-2.
 - **Workarounds for old servers' bugs.** russh makes those choices itself, and
   may refuse very old servers.
-- **Right-to-left text.** Arabic and Hebrew aren't yet laid out right to left
-  or shaped.
 
 The tools differ too:
 

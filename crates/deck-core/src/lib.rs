@@ -2,6 +2,7 @@
 //! keys, the terminal, key encoding and the network sessions.
 
 pub mod algorithms;
+mod bidi;
 mod authplugin;
 pub mod compose;
 pub mod config;

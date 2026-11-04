@@ -282,6 +282,10 @@ pub struct Terminal {
     mouse_reports: bool,
     /// `BlinkText`: blinking text blinks.
     blink_text: bool,
+    /// `DisableBidi`: right-to-left text is shown in the order it came.
+    no_bidi: bool,
+    /// `DisableArabicShaping`: Arabic letters keep their plain forms.
+    no_shaping: bool,
     bracketed_paste: bool,
     /// The session's starting modes, put back by a reset.
     start: Vec<u8>,
@@ -428,6 +432,8 @@ impl Terminal {
         self.palette = Palette::from_settings(s);
         self.mouse_reports = !s.b("NoMouseReporting", false);
         self.blink_text = s.b("BlinkText", false);
+        self.no_bidi = s.b("DisableBidi", false);
+        self.no_shaping = s.b("DisableArabicShaping", false);
         self.bracketed_paste = !s.b("DisableBracketedPaste", false);
     }
 
@@ -458,6 +464,8 @@ impl Terminal {
             palette: Palette::from_settings(s),
             mouse_reports: !s.b("NoMouseReporting", false),
             blink_text: s.b("BlinkText", false),
+            no_bidi: s.b("DisableBidi", false),
+            no_shaping: s.b("DisableArabicShaping", false),
             bracketed_paste: !s.b("DisableBracketedPaste", false),
             start: Vec::new(),
         };
@@ -994,7 +1002,62 @@ impl Terminal {
         let c = content.cursor.point;
         let row = c.line.0 + offset;
         let visible = self.term.mode().contains(TermMode::SHOW_CURSOR) && (0..lines as i32).contains(&row);
-        Screen { rows, cursor: visible.then_some((c.column.0, row as usize)) }
+        let mut cursor = visible.then_some((c.column.0, row as usize));
+        // right-to-left text, and Arabic shaping, as PuTTY shows them
+        if !self.no_bidi || !self.no_shaping {
+            for (r, cells) in rows.iter_mut().enumerate() {
+                let moved = self.lay_out_line(cells);
+                if let (Some((col, cr)), Some(moved)) = (cursor, moved) {
+                    if cr == r {
+                        cursor = Some((moved.get(col).copied().unwrap_or(col), r));
+                    }
+                }
+            }
+        }
+        Screen { rows, cursor }
+    }
+
+    /// Lays out one line with right-to-left text in it: runs of it turned
+    /// about, brackets in them facing the other way, and Arabic letters in
+    /// their joined forms. Says where each cell went, or nothing for a line
+    /// with no right-to-left text, which stays as it is.
+    fn lay_out_line(&self, cells: &mut Vec<RenderCell>) -> Option<Vec<usize>> {
+        let chars: Vec<char> = cells.iter().map(|c| c.c).collect();
+        if !crate::bidi::has_rtl(&chars) {
+            return None;
+        }
+        // a wide character and the blank half after it move together
+        let mut units: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut i = 0;
+        while i < cells.len() {
+            let len = if cells[i].wide && i + 1 < cells.len() { 2 } else { 1 };
+            units.push(i..i + len);
+            i += len;
+        }
+        let text: Vec<char> = units.iter().map(|u| cells[u.start].c).collect();
+        let (order, rtl) = if self.no_bidi { ((0..units.len()).collect(), vec![false; units.len()]) } else { crate::bidi::visual_order(&text) };
+        let mut laid = Vec::with_capacity(cells.len());
+        let mut moved = vec![0; cells.len()];
+        for &u in &order {
+            for (k, from) in units[u].clone().enumerate() {
+                moved[from] = laid.len();
+                let mut cell = cells[from];
+                if k == 0 && rtl[u] {
+                    cell.c = crate::bidi::mirror(cell.c);
+                }
+                laid.push(cell);
+            }
+        }
+        if !self.no_shaping {
+            let starts: Vec<usize> = order.iter().map(|&u| moved[units[u].start]).collect();
+            let mut shown: Vec<char> = starts.iter().map(|&p| laid[p].c).collect();
+            crate::bidi::shape(&mut shown);
+            for (&p, c) in starts.iter().zip(shown) {
+                laid[p].c = c;
+            }
+        }
+        *cells = laid;
+        Some(moved)
     }
 
     /// One screen row as plain text, for tests.
@@ -1140,6 +1203,19 @@ mod tests {
             s.set(k, v.clone());
         }
         s
+    }
+
+    #[test]
+    fn right_to_left_text_shows_right_to_left() {
+        let mut t = Terminal::new(20, 2);
+        t.feed("ab \u{5d0}\u{5d1}\u{5d2} (x)".as_bytes());
+        assert_eq!(t.row_text(0), "ab \u{5d2}\u{5d1}\u{5d0} (x)");
+        t.feed("\r\n\u{628}\u{628}\u{628}".as_bytes());
+        assert_eq!(t.row_text(1), "\u{fe90}\u{fe92}\u{fe91}", "turned about and joined");
+        assert_eq!(t.selected_text(), None);
+        let mut plain = Terminal::with_settings(20, 2, &settings_of(&[("DisableBidi", Value::Int(1)), ("DisableArabicShaping", Value::Int(1))]));
+        plain.feed("\u{5d0}\u{5d1} \u{628}\u{628}".as_bytes());
+        assert_eq!(plain.row_text(0), "\u{5d0}\u{5d1} \u{628}\u{628}", "both can be turned off");
     }
 
     #[test]
