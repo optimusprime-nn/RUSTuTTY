@@ -22,6 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 const WM_TEST_KEY: u32 = WM_APP + 0x10;
 const WM_TEST_DUMP: u32 = WM_APP + 0x11;
 const WM_TEST_CLIP: u32 = WM_APP + 0x12;
+const WM_TEST_SET: u32 = WM_APP + 0x14;
 const BM_CLICK: u32 = 0x00F5;
 const CTRL: isize = 1;
 const SHIFT: isize = 2;
@@ -158,6 +159,7 @@ impl App {
             .args(args)
             .env("RUSTUTTY_TEST_DUMP", dir.join("dump.txt"))
             .env("RUSTUTTY_TEST_CLIP", dir.join("clip.txt"))
+            .env("RUSTUTTY_TEST_SET", dir.join("set.txt"))
             .spawn()
             .unwrap();
         let end = Instant::now() + Duration::from_secs(10);
@@ -243,6 +245,13 @@ impl App {
 
     fn key(&self, vk: u8, flags: isize) {
         self.post(self.main, WM_TEST_KEY, vk as usize, flags);
+    }
+
+    /// Changes the session's settings, as Change Settings would.
+    fn set(&self, settings: &[(&str, &str)]) {
+        let text: String = settings.iter().map(|(k, v)| format!("{k}={v}\n")).collect();
+        std::fs::write(self.dir.join("set.txt"), text).unwrap();
+        self.post(self.main, WM_TEST_SET, 0, 0);
     }
 
     fn set_clip(&self, text: &str) {
@@ -721,6 +730,40 @@ async fn double_and_triple_clicks() {
     }
 }
 
+/// LockSize 2, PuTTY's "change the size of the font": when the window gets
+/// smaller the session keeps its rows and columns, and the font shrinks.
+#[tokio::test(flavor = "multi_thread")]
+async fn resizing_can_change_the_font_instead() {
+    let peer = Peer::start().await;
+    let app = App::start(&raw_args(peer.port));
+    peer.connected(1).await;
+    app.resize(1100, 700);
+    let d = app.until("session", |d| d.contains("term=")).await;
+    let size = |d: &str, key: &str| -> (i32, i32) {
+        let v = field(d, key);
+        let (c, r) = v.split_once('x').unwrap();
+        (c.parse().unwrap(), r.parse().unwrap())
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = size(&app.dump(), "term=");
+    let _ = d;
+    app.set(&[("LockSize", "2")]);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    app.resize(800, 500);
+    // the window is far smaller, yet the session's rows and columns all still
+    // fit in it: the font shrank to make room (in whole sizes, as PuTTY's)
+    let d = app.until("the font fitted", |d| {
+        let (gc, gr) = size(d, "grid=");
+        size(d, "term=") == before && gc >= before.0 && gr >= before.1
+    })
+    .await;
+    assert_eq!(size(&d, "term="), before, "the rows and columns stay");
+    // and back to resizing the terminal: it follows the window again
+    app.set(&[("LockSize", "0")]);
+    app.resize(1200, 760);
+    app.until("the terminal follows the window", |d| size(d, "term=") == size(d, "grid=") && size(d, "term=") != before).await;
+}
+
 /// xterm's window operations: the host can ask the window's size in pixels
 /// and set it in characters.
 #[tokio::test(flavor = "multi_thread")]
@@ -933,6 +976,8 @@ async fn selecting_past_the_edge_scrolls() {
     let d = app.until("selection copied", |d| field(d, "clip=").contains("line ")).await;
     let clip = field(&d, "clip=");
     assert!(clip.contains(&format!("line {}", first_shown - 1)), "the selection reaches lines that were off screen: {clip}");
+    // once it's let go, the position holds
+    let held = pos();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(pos(), held, "letting go stops the scrolling");
 

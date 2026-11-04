@@ -40,6 +40,10 @@ const WM_TEST_DUMP: u32 = WM_APP + 0x11;
 const WM_TEST_CLIP: u32 = WM_APP + 0x12;
 #[cfg(feature = "test-hooks")]
 const WM_TEST_SETTINGS: u32 = WM_APP + 0x13;
+/// Changes the session's settings as Change Settings would, from the file
+/// RUSTUTTY_TEST_SET names: `key=number` or `key=text` a line.
+#[cfg(feature = "test-hooks")]
+const WM_TEST_SET: u32 = WM_APP + 0x14;
 
 /// The most one print job takes: a host can otherwise print forever.
 const MAX_PRINT_JOB: usize = 64 << 20;
@@ -188,6 +192,9 @@ struct Deck {
     event_log: Option<(HWND, u64)>,
     /// The size tip, while the window's frame is being dragged.
     size_tip: Option<HWND>,
+    /// The font size in pixels that fills the window, when the session's
+    /// LockSize changes the font rather than the rows and columns.
+    fitted_px: Option<i32>,
     focused: bool,
     started: std::time::Instant,
     cursor_off: bool,
@@ -275,6 +282,17 @@ unsafe extern "system" fn event_log_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: L
         _ => return DefWindowProcW(hwnd, msg, wp, lp),
     }
     LRESULT(0)
+}
+
+/// `LockSize` says the font changes size, rather than the rows and columns:
+/// 2 always, and 3 when the window is maximised or full screen.
+fn fits_font(s: &Settings, zoomed: bool) -> bool {
+    matches!(s.i("LockSize", 0), 2) || (s.i("LockSize", 0) == 3 && zoomed)
+}
+
+/// The session's rows and columns stay as they are when the window changes.
+fn keeps_size(s: &Settings, zoomed: bool) -> bool {
+    s.i("LockSize", 0) == 1 || fits_font(s, zoomed)
 }
 
 /// `UseSystemColours`: Windows' own text and background colours.
@@ -408,7 +426,63 @@ impl Deck {
         // FontHeight is in points, and 10pt is 13px at 96 dpi
         let points = s.map_or(0, |s| s.i("FontHeight", 0)) as i32;
         let px = if points > 0 { points * 96 / 72 } else { 14 };
+        // a size worked out to fill the window, for LockSize 2 and 3
+        let px = self.fitted_px.unwrap_or(px);
         (if name.is_empty() { "Consolas".to_string() } else { name }, px)
+    }
+
+    /// LockSize 2, and 3 when maximised or full screen, as PuTTY's "change the
+    /// size of the font": the session keeps its rows and columns, and the font
+    /// grows or shrinks to fill the window.
+    fn fit_font(&mut self) {
+        let zoomed = self.full_screen.is_some() || unsafe { IsZoomed(self.main).as_bool() };
+        let Some((cols, rows)) = self.current().filter(|s| fits_font(&s.target.settings, zoomed)).map(|s| s.term.size()) else {
+            if self.fitted_px.take().is_some() {
+                self.make_fonts();
+            }
+            return;
+        };
+        let mut r = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.content, &mut r);
+        }
+        let b = self.border() * 2;
+        let (w, h) = ((r.right - r.left - b).max(1), (r.bottom - r.top - b).max(1));
+        // the largest font whose cells all fit, measured, starting from where
+        // the cell grows in proportion with the font
+        let (name, now) = self.font_in_use.clone();
+        let fits = |px: i32| {
+            let (cw, ch) = self.measure(&name, px);
+            cw * cols as i32 <= w && ch * rows as i32 <= h
+        };
+        let scale = (w as f32 / cols as f32 / self.cell.0.max(1) as f32).min(h as f32 / rows as f32 / self.cell.1.max(1) as f32);
+        let mut px = ((now as f32 * scale) as i32).clamp(4, 200);
+        while px < 200 && fits(px + 1) {
+            px += 1;
+        }
+        while px > 4 && !fits(px) {
+            px -= 1;
+        }
+        if px != now || self.fitted_px != Some(px) {
+            self.fitted_px = Some(px);
+            self.make_fonts();
+        }
+    }
+
+    /// A font's cell size at a size in pixels, before DPI scaling.
+    fn measure(&self, name: &str, px: i32) -> (i32, i32) {
+        unsafe {
+            let face = wide(name);
+            let font = CreateFontW(-self.px(px), 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, (FF_MODERN.0 | FIXED_PITCH.0) as u32, PCWSTR(face.as_ptr()));
+            let dc = GetDC(Some(self.content));
+            let old = SelectObject(dc, font.into());
+            let mut tm = TEXTMETRICW::default();
+            let _ = GetTextMetricsW(dc, &mut tm);
+            SelectObject(dc, old);
+            ReleaseDC(Some(self.content), dc);
+            let _ = DeleteObject(font.into());
+            (tm.tmAveCharWidth.max(1), tm.tmHeight.max(1))
+        }
     }
 
     fn make_fonts(&mut self) {
@@ -550,10 +624,13 @@ impl Deck {
                 let _ = RedrawWindow(Some(self.main), Some(&panel), None, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             }
         }
+        self.fit_font();
         let (cols, rows) = self.grid();
+        let zoomed = self.full_screen.is_some() || unsafe { IsZoomed(self.main).as_bool() };
         for s in &mut self.sessions {
-            // LockSize 1: the session keeps its size, whatever the window does
-            if s.target.settings.i("LockSize", 0) == 1 {
+            // LockSize 1: the session keeps its size, whatever the window
+            // does; 2, and 3 when maximised, change the font instead
+            if keeps_size(&s.target.settings, zoomed) {
                 continue;
             }
             if s.term.size() != (cols as usize, rows as usize) {
@@ -875,7 +952,9 @@ impl Deck {
         let (cols, rows) = self.grid();
         let settings = &target.settings;
         // a session with a locked size keeps the one it was saved with
-        let locked = settings.i("LockSize", 0) == 1;
+        // a session whose font changes to fit starts at its saved size, as a
+        // locked one does
+        let locked = matches!(settings.i("LockSize", 0), 1 | 2);
         let (tc, tr) = (settings.i("TermWidth", cols), settings.i("TermHeight", rows));
         let (ic, ir) = if locked { (tc, tr) } else { (cols, rows) };
         let mut term = Terminal::with_settings(ic as usize, ir as usize, settings);
@@ -980,7 +1059,8 @@ impl Deck {
         self.active = Some(i);
         self.sessions[i].bell = false;
         self.apply_window_settings();
-        if self.wanted_font() != self.font_in_use {
+        // a font fitted to the last session's window is worked out again
+        if self.wanted_font() != self.font_in_use || self.fitted_px.is_some() || self.current().is_some_and(|s| s.target.settings.i("LockSize", 0) >= 2) {
             self.make_fonts();
             self.layout();
         }
@@ -1156,7 +1236,13 @@ impl Deck {
         if !cfg!(feature = "test-hooks") {
             self.reload_saved();
         }
-        let Some(new) = new else { return };
+        if let Some(new) = new {
+            self.apply_settings(i, new);
+        }
+    }
+
+    /// New settings for a running session, as PuTTY's reconfig.
+    fn apply_settings(&mut self, i: usize, new: Settings) {
         let s = &mut self.sessions[i];
         (s.keys, s.bells) = (KeyConfig::new(&new), BellLimit::new(&new));
         // as PuTTY's reconfig: the terminal, local echo, line editing and the
@@ -2267,6 +2353,10 @@ impl Deck {
         out += &format!("clip={:?}\n", clipboard::get().unwrap_or_default());
         out += &format!("eventlog={}\n", self.event_log.is_some());
         if let Some(s) = self.current() {
+            let (c, r) = s.term.size();
+            out += &format!("term={c}x{r}\n");
+        }
+        if let Some(s) = self.current() {
             out += &format!("selection={}\nalt={}\n", s.term.has_selection(), s.term.alt_screen());
             for r in 0..s.term.size().1 {
                 out += &format!("row={}\n", s.term.row_text(r));
@@ -2362,6 +2452,18 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             let (_, _, s) = settings_window::edit(hwnd, d.gui_font, "test", s);
             assert_eq!(s.s("TerminalType", "xterm"), "xterm", "a blank box mustn't replace a default");
             d.open_target(target_from(s));
+        }
+        #[cfg(feature = "test-hooks")]
+        WM_TEST_SET => {
+            if let (Some(i), Ok(p)) = (d.active, std::env::var("RUSTUTTY_TEST_SET")) {
+                let mut s = d.sessions[i].target.settings.clone();
+                for line in std::fs::read_to_string(p).unwrap_or_default().lines() {
+                    if let Some((k, v)) = line.split_once('=') {
+                        s.set(k, v.parse().map_or_else(|_| Value::Str(v.to_string()), Value::Int));
+                    }
+                }
+                d.apply_settings(i, s);
+            }
         }
         #[cfg(feature = "test-hooks")]
         WM_TEST_CLIP => {
@@ -2635,7 +2737,7 @@ fn main() {
             cell: (8, 16), dpi: GetDpiForWindow(main).max(96), font_in_use: (String::new(), 0),
             sessions: Vec::new(), active: None, next_id: 1, saved,
             inbox: Default::default(), rt, store,
-            skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), clicks: (std::time::Instant::now(), 0, LPARAM(0)), wheel: 0, hwheel: 0, last_move: None, key_repeat: false, caret: (0, 0), composing: false, event_log: None, size_tip: None, focused: false,
+            skip_char: false, high_surrogate: None, selecting: false, drag_at: LPARAM(0), clicks: (std::time::Instant::now(), 0, LPARAM(0)), wheel: 0, hwheel: 0, last_move: None, key_repeat: false, caret: (0, 0), composing: false, event_log: None, size_tip: None, fitted_px: None, focused: false,
             started: std::time::Instant::now(), cursor_off: false, flash: false, pointer_hidden: false, compose_state: 0, compose_first: 0, full_screen: None, close_held: None, system_items: 0,
         }));
         DECK.store(d, Ordering::Release);
