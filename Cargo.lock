@@ -554,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "deck-setup"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deck-ui",
  "embed-resource",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "deck-tools"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "anyhow",
  "deck-core",
@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "rustutty"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.4"
 dependencies = [
  "deck-core",
  "deck-ui",
