@@ -223,8 +223,11 @@ pub(crate) async fn run(target: &Target, conn: Conn, telnet: bool, mut io: Io) -
     }
     io.logged_in();
     let mut buf = [0u8; 8192];
+    // Telnet's keepalive is a NOP, as PuTTY's; a raw connection has none
+    let mut ping = if telnet { crate::ssh::keepalives(s.ping_seconds()) } else { None };
     loop {
         tokio::select! {
+            _ = crate::ssh::tick(&mut ping) => wr.write_all(&[255, 241]).await?,
             n = rd.read(&mut buf) => {
                 let n = n?;
                 if n == 0 {
@@ -249,6 +252,7 @@ pub(crate) async fn run(target: &Target, conn: Conn, telnet: bool, mut io: Io) -
                 // answers reach here as Input, once the session is ready
                 Some(Command::Reply(_)) => {}
                 Some(Command::Special(crate::session::Special::Telnet(code))) if telnet => wr.write_all(&[255, code]).await?,
+                Some(Command::Reconfigure(new)) if telnet => ping = crate::ssh::keepalives(new.settings.ping_seconds()),
                 Some(Command::Special(_) | Command::Reconfigure(_)) => {}
                 Some(Command::Input(b)) => {
                     let b = if telnet { encode_input(&b, keyboard, newline) } else { b };

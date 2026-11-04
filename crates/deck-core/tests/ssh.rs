@@ -921,3 +921,40 @@ async fn a_running_session_starts_logging_when_told() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(logged.contains("after") && !logged.contains("before"), "only output after the change is logged: {logged:?}");
 }
+
+/// Change Settings reaches the keepalives of a session already running: a
+/// Telnet session told to send them every second starts sending NOPs.
+#[tokio::test(flavor = "multi_thread")]
+async fn keepalives_follow_a_change_of_settings() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (got_tx, mut got_rx) = unbounded_channel::<Vec<u8>>();
+    tokio::spawn(async move {
+        let (mut c, _) = listener.accept().await.unwrap();
+        c.write_all(b"hello\r\n").await.unwrap();
+        let mut buf = [0u8; 256];
+        while let Ok(n) = c.read(&mut buf).await {
+            if n == 0 || got_tx.send(buf[..n].to_vec()).is_err() {
+                return;
+            }
+        }
+    });
+    let mut target = Target::new(Protocol::Telnet, "127.0.0.1", port);
+    target.settings.set("PassiveTelnet", Value::Int(1));
+    let mut c = Client::open_target(target.clone(), Arc::new(MemoryStore::default()));
+    c.expect("hello").await;
+    target.settings.set("PingIntervalSecs", Value::Int(1));
+    c.tx.send(Command::Reconfigure(Box::new(target))).unwrap();
+    let nop = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut all = Vec::new();
+        while let Some(b) = got_rx.recv().await {
+            all.extend(b);
+            if all.windows(2).any(|w| w == [255, 241]) {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(nop, Ok(true), "a NOP within a few seconds");
+}

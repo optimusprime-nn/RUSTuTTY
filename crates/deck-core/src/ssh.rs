@@ -562,10 +562,8 @@ async fn authenticate(handle: &mut Handle<Client>, io: &Arc<Mutex<Io>>, target: 
 }
 
 fn client_config(s: &Settings, store: &dyn HostKeyStore, host: &str, port: u16) -> anyhow::Result<client::Config> {
-    let ping = s.ping_seconds();
     let bytes = algorithms::rekey_bytes(s);
     let mut config = client::Config {
-        keepalive_interval: (ping > 0).then(|| Duration::from_secs(ping as u64)),
         nodelay: s.b("TCPNoDelay", true),
         limits: russh::Limits::new(bytes, bytes, algorithms::rekey_time(s)),
         preferred: algorithms::preferred(s, |a| hostkeys::known(store, host, port, a))?,
@@ -575,6 +573,27 @@ fn client_config(s: &Settings, store: &dyn HostKeyStore, host: &str, port: u16) 
         config.preferred.compression = Cow::Borrowed(&[compression::NONE]);
     }
     Ok(config)
+}
+
+/// PuTTY's keepalives, every so many seconds, or none for 0. They're sent
+/// here rather than by russh so a change of settings can reach them.
+pub(crate) fn keepalives(seconds: u32) -> Option<tokio::time::Interval> {
+    (seconds > 0).then(|| {
+        let every = Duration::from_secs(seconds as u64);
+        let mut t = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        t
+    })
+}
+
+/// The next keepalive, or never.
+pub(crate) async fn tick(ping: &mut Option<tokio::time::Interval>) {
+    match ping {
+        Some(t) => {
+            t.tick().await;
+        }
+        None => std::future::pending().await,
+    }
 }
 
 /// `LogHost`, which can be `host`, `host:port`, `[v6]:port` or a bare IPv6 address.
@@ -914,7 +933,17 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
     // PuTTY's "Don't start a shell or command at all", for forwarding only
     if s.b("SshNoShell", false) {
         io.say("Connected, with no shell. Close the session to disconnect.\n");
-        while !matches!(io.commands.recv().await, None | Some(Command::Close)) {}
+        let mut ping = keepalives(s.ping_seconds());
+        loop {
+            tokio::select! {
+                _ = tick(&mut ping) => handle.send_keepalive(false).await?,
+                cmd = io.commands.recv() => match cmd {
+                    None | Some(Command::Close) => break,
+                    Some(Command::Reconfigure(new)) => ping = keepalives(new.settings.ping_seconds()),
+                    Some(_) => {}
+                },
+            }
+        }
         forwards.iter().for_each(JoinHandle::abort);
         handle.disconnect(russh::Disconnect::ByApplication, "", "en").await.ok();
         return Ok("Session closed.".into());
@@ -951,8 +980,10 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
 
     io.logged_in();
     let mut status = None;
+    let mut ping = keepalives(s.ping_seconds());
     let reason = loop {
         tokio::select! {
+            _ = tick(&mut ping) => handle.send_keepalive(false).await?,
             msg = channel.wait() => match msg {
                 Some(ChannelMsg::Data { data }) => (io.events)(Event::Output(data.to_vec())),
                 Some(ChannelMsg::ExtendedData { data, .. }) => (io.events)(Event::Output(data.to_vec())),
@@ -976,7 +1007,9 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
                 Some(Command::Special(crate::session::Special::Rekey)) => handle.rekey_soon().await?,
                 // russh can't send IGNORE: a keepalive also keeps the connection busy
                 Some(Command::Special(crate::session::Special::Ignore)) => handle.send_keepalive(false).await?,
-                Some(Command::Special(_) | Command::Reconfigure(_)) => {}
+                // Change Settings: the keepalive interval takes effect at once, as PuTTY's
+                Some(Command::Reconfigure(new)) => ping = keepalives(new.settings.ping_seconds()),
+                Some(Command::Special(_)) => {}
                 Some(Command::Resize { cols: c, rows: r }) => {
                     if (c, r) != (cols, rows) {
                         (cols, rows) = (c, r);

@@ -355,7 +355,8 @@ pub fn spawn(
                             sink(Event::Local(format!("\r\nCould not open the log file: {why}\r\n").into_bytes()));
                         }
                     }
-                    continue;
+                    // and on to the protocol, for what it can change, such as keepalives
+                    Command::Reconfigure(new)
                 }
                 Command::Input(bytes) if state.ready.load(Ordering::Relaxed) => {
                     let (send, show) = ldisc.feed(&bytes, &state);
