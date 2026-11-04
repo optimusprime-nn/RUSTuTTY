@@ -576,6 +576,22 @@ async fn sessions_can_share_a_connection() {
     second.expect("still here").await;
 }
 
+/// A session joining a shared connection sets up its own forwardings on it,
+/// local and remote.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_joining_session_forwards_too() {
+    let (port, _) = server::start(new_key(Algorithm::Ed25519), vec![MethodKind::Password]).await;
+    let store = Arc::new(MemoryStore::default());
+    let mut first = Client::open_target(user_target(port, &[("ConnectionSharing", Value::Int(1))]), store.clone());
+    first.login().await;
+    let (dest, local, remote) = (upper_server().await, free_port().await, free_port().await);
+    let fwd = format!("L{local}=127.0.0.1:{dest},R{remote}=127.0.0.1:{dest}");
+    let mut second = Client::open_target(user_target(port, &[("ConnectionSharing", Value::Int(1)), ("PortForwardings", text(&fwd))]), store);
+    second.expect("Sharing an existing connection").await;
+    assert_eq!(round_trip(&mut connect_retry(local).await).await, b"PING", "local");
+    assert_eq!(round_trip(&mut connect_retry(remote).await).await, b"PING", "remote");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sharing_needs_turning_on() {
     let (port, seen) = server::start(new_key(Algorithm::Ed25519), vec![MethodKind::Password]).await;

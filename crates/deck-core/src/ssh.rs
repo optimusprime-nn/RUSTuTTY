@@ -47,7 +47,7 @@ struct Client {
     manual_keys: Vec<String>,
     banner: bool,
     /// What this session asked for. Anything else the server opens is refused.
-    remote_forwards: HashMap<u16, (String, u16)>,
+    remote_forwards: RemoteForwards,
     agent: bool,
     x11: Option<X11>,
 }
@@ -160,7 +160,7 @@ impl client::Handler for Client {
         reply: client::ChannelOpenHandle,
         _: &mut client::Session,
     ) -> Result<(), Self::Error> {
-        let Some((host, host_port)) = self.remote_forwards.get(&(port as u16)).cloned() else {
+        let Some((host, host_port)) = self.remote_forwards.lock().ok().and_then(|f| f.get(&(port as u16)).cloned()) else {
             reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
             return Ok(());
         };
@@ -612,7 +612,16 @@ fn log_host(value: &str, port: u16) -> (String, u16) {
 /// Connects and logs in, for sessions and for SSH proxies alike. Only a `full`
 /// session asks the server for forwarding, so only it will accept the channels:
 /// file transfers and proxies never offer the server a way to Pageant.
+/// Where each remote forwarding's connections go, by the remote port. Shared,
+/// so a session joining a connection can add its own.
+type RemoteForwards = Arc<StdMutex<HashMap<u16, (String, u16)>>>;
+
 async fn login(target: &Target, store: Arc<dyn HostKeyStore>, io: Arc<Mutex<Io>>, x11: Option<X11>, full: bool) -> anyhow::Result<Handle<Client>> {
+    Ok(login_with(target, store, io, x11, full).await?.0)
+}
+
+/// Logs in, and gives back the connection's remote forwardings too.
+async fn login_with(target: &Target, store: Arc<dyn HostKeyStore>, io: Arc<Mutex<Io>>, x11: Option<X11>, full: bool) -> anyhow::Result<(Handle<Client>, RemoteForwards)> {
     let s = &target.settings;
     anyhow::ensure!(s.i("SshProt", 3) != 0, "This session is set to SSH-1 only, which RUSTuTTY doesn't support.");
     let events = io.lock().await.events.clone();
@@ -627,6 +636,8 @@ async fn login(target: &Target, store: Arc<dyn HostKeyStore>, io: Arc<Mutex<Io>>
             _ => None,
         })
         .collect();
+    let remote_forwards: RemoteForwards = Arc::new(StdMutex::new(remote_forwards));
+    let forwards = remote_forwards.clone();
     let client = Client {
         host: key_host,
         port: key_port,
@@ -660,7 +671,7 @@ async fn login(target: &Target, store: Arc<dyn HostKeyStore>, io: Arc<Mutex<Io>>
         }
         return Err(e);
     }
-    Ok(handle)
+    Ok((handle, forwards))
 }
 
 pub(crate) enum Tunnel {
@@ -845,12 +856,16 @@ async fn serve_local(handle: Arc<Handle<Client>>, listener: TcpListener, dest: O
 }
 
 /// Sets up the session's forwardings. A failure is reported, not fatal, as in PuTTY.
-async fn start_forwards(handle: &Arc<Handle<Client>>, s: &Settings, say: impl Fn(&str)) -> Vec<JoinHandle<()>> {
+async fn start_forwards(handle: &Arc<Handle<Client>>, remote: &RemoteForwards, s: &Settings, say: impl Fn(&str)) -> Vec<JoinHandle<()>> {
     let mut tasks = Vec::new();
     let local_all = s.b("LocalPortAcceptAll", false);
     for f in s.forwards() {
         let (bind, port, dest) = match f {
-            Forward::Remote { bind, port, .. } => {
+            Forward::Remote { bind, port, host, host_port } => {
+                // where its connections go, for this connection's handler
+                if let Ok(mut all) = remote.lock() {
+                    all.insert(port, (host, host_port));
+                }
                 let address = listen_address(bind, s.b("RemotePortAcceptAll", false));
                 if let Err(e) = handle.tcpip_forward(address, port as u32).await {
                     say(&format!("Remote port {port} could not be forwarded: {e}\n"));
@@ -872,7 +887,7 @@ async fn start_forwards(handle: &Arc<Handle<Client>>, s: &Settings, say: impl Fn
 /// with `ConnectionSharing` joins one here instead of logging in again. This
 /// works between sessions in one program: it doesn't speak PuTTY's own sharing
 /// protocol, so it can't join a connection held by a separate PuTTY.
-static SHARED: LazyLock<StdMutex<HashMap<String, Weak<Handle<Client>>>>> = LazyLock::new(Default::default);
+static SHARED: LazyLock<StdMutex<HashMap<String, (Weak<Handle<Client>>, RemoteForwards)>>> = LazyLock::new(Default::default);
 
 /// Two sessions share only if they'd have made the same connection, with the
 /// same checks. A login that can end up under another name is never shared.
@@ -888,9 +903,10 @@ fn share_key(target: &Target) -> Option<String> {
     Some(format!("{user}@{}:{} {text:?} {numbers:?} {:?} {manual:?}", target.host, target.port, target.key_file))
 }
 
-fn shared(key: &str) -> Option<Arc<Handle<Client>>> {
+fn shared(key: &str) -> Option<(Arc<Handle<Client>>, RemoteForwards)> {
     let map = SHARED.lock().ok()?;
-    map.get(key)?.upgrade().filter(|h| !h.is_closed())
+    let (handle, forwards) = map.get(key)?;
+    Some((handle.upgrade().filter(|h| !h.is_closed())?, forwards.clone()))
 }
 
 pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -> anyhow::Result<String> {
@@ -899,36 +915,31 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
     let io = Arc::new(Mutex::new(io));
     let key = share_key(target);
     let joined = key.as_deref().filter(|_| s.b("ConnectionSharingDownstream", true)).and_then(shared);
-    let is_shared = joined.is_some();
-    let handle = match joined {
-        Some(h) => {
+    let (handle, remote) = match joined {
+        Some(joined) => {
             io.lock().await.say("Sharing an existing connection.\n");
-            h
+            joined
         }
         None => {
-            let h = Arc::new(login(target, store, io.clone(), x11.clone(), true).await?);
+            let (h, remote) = login_with(target, store, io.clone(), x11.clone(), true).await?;
+            let h = Arc::new(h);
             if let (Some(k), true, Ok(mut map)) = (key, s.b("ConnectionSharingUpstream", true), SHARED.lock()) {
-                map.retain(|_, w| w.strong_count() > 0);
-                map.insert(k, Arc::downgrade(&h));
+                map.retain(|_, (w, _)| w.strong_count() > 0);
+                map.insert(k, (Arc::downgrade(&h), remote.clone()));
             }
-            h
+            (h, remote)
         }
     };
     let mut io = io.lock().await;
-    if is_shared && !s.forwards().is_empty() {
-        io.say("Forwardings aren't set up on a shared connection.\n");
+    // a session joining a shared connection sets up its own forwardings on it
+    for f in s.forwards() {
+        io.log(match f {
+            Forward::Local { port, host, host_port, .. } => format!("Local port {port} forwarding to {host}:{host_port}"),
+            Forward::Remote { port, host, host_port, .. } => format!("Requesting remote port {port} forward to {host}:{host_port}"),
+            Forward::Dynamic { port, .. } => format!("Local port {port} SOCKS dynamic forwarding"),
+        });
     }
-    let no_forwards = Settings::default();
-    if !is_shared {
-        for f in s.forwards() {
-            io.log(match f {
-                Forward::Local { port, host, host_port, .. } => format!("Local port {port} forwarding to {host}:{host_port}"),
-                Forward::Remote { port, host, host_port, .. } => format!("Requesting remote port {port} forward to {host}:{host_port}"),
-                Forward::Dynamic { port, .. } => format!("Local port {port} SOCKS dynamic forwarding"),
-            });
-        }
-    }
-    let forwards = start_forwards(&handle, if is_shared { &no_forwards } else { s }, |t| io.say(t)).await;
+    let forwards = start_forwards(&handle, &remote, s, |t| io.say(t)).await;
 
     // PuTTY's "Don't start a shell or command at all", for forwarding only
     if s.b("SshNoShell", false) {

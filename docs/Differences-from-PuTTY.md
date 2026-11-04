@@ -57,7 +57,7 @@ The tools differ too:
   exchange or host key type RUSTuTTY can use, it isn't connected, and the
   message says which list to change.
 - `Ctrl+Shift+C` and `Ctrl+Shift+V` always work, whatever **CtrlShiftCV** says.
-- Connection sharing works between sessions in one RUSTuTTY. It can't join a
-  connection held by a separate PuTTY, and forwardings on a joining session
-  aren't set up.
+- Connection sharing works between sessions in one RUSTuTTY, forwardings
+  included. It can't join a connection held by a separate PuTTY: that takes
+  passing SSH messages straight through, which russh doesn't allow.
 
