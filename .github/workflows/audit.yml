@@ -28,14 +28,29 @@ jobs:
       - name: Check dependencies for advisories
         run: cargo audit --deny warnings --file Cargo.lock
       # An accepted advisory stays ignored even after a fix ships, so this fails
-      # the run as soon as one has a fixed version, or is withdrawn
-      - name: Check accepted advisories still have no fix
+      # the run once one is withdrawn, or once updating the dependencies would
+      # bring in its fix. A fix the crates we use don't accept yet only warns.
+      - name: Check accepted advisories still have no fix we can take
         run: |
+          ids=$(grep -o 'RUSTSEC-[0-9]*-[0-9]*' .cargo/audit.toml | sort -u)
+          # What the newest versions our dependencies allow would still have
+          cargo update --quiet
+          mv .cargo/audit.toml "$RUNNER_TEMP/audit.toml"
+          cargo audit --no-fetch --json --file Cargo.lock > "$RUNNER_TEMP/updated.json" || true
+          mv "$RUNNER_TEMP/audit.toml" .cargo/audit.toml
+          git checkout -- Cargo.lock
           fail=0
-          for id in $(grep -o 'RUSTSEC-[0-9]*-[0-9]*' .cargo/audit.toml | sort -u); do
+          for id in $ids; do
             file=$(find ~/.cargo/advisory-db/crates -name "$id.md" | head -1)
-            if [ -z "$file" ] || ! grep -q '^patched = \[\]' "$file"; then
-              echo "::error::$id now has a fix or was withdrawn: update the crate and take it out of .cargo/audit.toml"
+            if [ -z "$file" ]; then
+              echo "::error::$id was withdrawn: take it out of .cargo/audit.toml"
+              fail=1
+            elif grep -q '^patched = \[\]' "$file"; then
+              continue
+            elif jq -e --arg id "$id" '[.vulnerabilities.list[].advisory.id] | index($id)' "$RUNNER_TEMP/updated.json" > /dev/null; then
+              echo "::warning::$id has a fix, but the crates that use it don't accept the fixed version yet"
+            else
+              echo "::error::$id has a fix that cargo update brings in: update the crate and take it out of .cargo/audit.toml"
               fail=1
             fi
           done

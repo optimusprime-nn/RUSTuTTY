@@ -1,9 +1,10 @@
 # Settings for `cargo audit` and the Audit workflow.
 [advisories]
 ignore = [
-    # The Marvin attack on the rsa crate, which russh uses. No fixed version
-    # exists yet. RUSTuTTY only signs with RSA, once per login, and its Pageant
-    # only answers programs running as the same user. The Audit workflow fails
-    # once a fix ships: then update the crate and remove this line.
+    # The Marvin attack on the rsa crate, which russh uses. rsa 0.10.0 fixes
+    # it, but russh 0.65 still asks for 0.10.0-rc.18. RUSTuTTY only signs with
+    # RSA, once per login, and its Pageant only answers programs running as the
+    # same user. The Audit workflow fails once cargo update can bring in the
+    # fix: then update and remove this line.
     "RUSTSEC-2023-0071",
 ]
