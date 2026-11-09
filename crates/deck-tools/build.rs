@@ -11,7 +11,7 @@ const TOOLS: [(&str, &str); 5] = [
 
 fn main() {
     let version = std::env::var("CARGO_PKG_VERSION").unwrap();
-    // 1.0.0-beta.4 is file version 1,0,0,0: the parts Windows can hold
+    // 1.0.0-beta.5 is file version 1,0,0,0: the parts Windows can hold
     let numbers: Vec<&str> = version.split(['.', '-']).take(3).collect();
     let numeric = format!("{},0", numbers.join(","));
     let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
