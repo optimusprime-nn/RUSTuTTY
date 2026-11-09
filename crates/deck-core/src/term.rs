@@ -304,7 +304,6 @@ pub struct Terminal {
     raw_tail: Vec<u8>,
     encoder: Option<Encoder>,
     title: String,
-    scroll_on_output: bool,
     scroll_on_key: bool,
     paste_controls: bool,
     rect_select: bool,
@@ -424,7 +423,6 @@ impl Terminal {
         if !self.remote_title {
             self.title = s.s("WinTitle", "");
         }
-        self.scroll_on_output = s.b("ScrollOnDisp", true);
         self.scroll_on_key = s.b("ScrollOnKey", false);
         self.paste_controls = s.b("PasteControls", false);
         self.rect_select = s.b("RectSelect", false);
@@ -452,7 +450,6 @@ impl Terminal {
             remote_title: !s.b("NoRemoteWinTitle", false),
             urxvt_mouse: false,
             reverse: None,
-            scroll_on_output: s.b("ScrollOnDisp", true),
             scroll_on_key: s.b("ScrollOnKey", false),
             paste_controls: s.b("PasteControls", false),
             rect_select: s.b("RectSelect", false),
@@ -612,9 +609,6 @@ impl Terminal {
                 }
             };
             self.events.0.lock().unwrap().push(TermEvent::Reply(reply));
-        }
-        if self.scroll_on_output {
-            self.scroll_to_bottom();
         }
     }
 
@@ -1325,6 +1319,33 @@ mod tests {
     }
 
     #[test]
+    fn output_leaves_a_scrolled_back_view_where_it_is() {
+        let mut t = Terminal::new(20, 5);
+        for i in 0..100 {
+            t.feed(format!("line {i}\r\n").as_bytes());
+        }
+        t.scroll(30);
+        let reading = t.row_text(0);
+        for i in 100..400 {
+            t.feed(format!("line {i}\r\n").as_bytes());
+        }
+        assert_eq!(t.row_text(0), reading, "the text being read stays on screen while output goes on");
+        t.scroll_to_bottom();
+        t.feed(b"latest");
+        assert_eq!(t.row_text(4), "latest", "at the bottom, the view follows output");
+        let mut s = Settings::default();
+        s.set("ScrollOnDisp", Value::Int(1));
+        let mut putty = Terminal::with_settings(20, 5, &s);
+        for i in 0..100 {
+            putty.feed(format!("line {i}\r\n").as_bytes());
+        }
+        putty.scroll(30);
+        let reading = putty.row_text(0);
+        putty.feed(b"more\r\n");
+        assert_eq!(putty.row_text(0), reading, "even with PuTTY's ScrollOnDisp, as PuTTY's saved sessions have it");
+    }
+
+    #[test]
     fn the_menus_clear_and_reset_skip_the_host_filter() {
         let mut s = Settings::default();
         s.set("NoRemoteClearScroll", crate::settings::Value::Int(1));
@@ -1568,20 +1589,6 @@ mod tests {
         t.feed(&[0xc0]);
         assert_eq!(t.row_text(0), "А");
         assert_eq!(with(&[("LineCodePage", Value::Str("UTF-8".into()))]).encode_text("é"), "é".as_bytes());
-    }
-
-    #[test]
-    fn output_scrolls_to_the_bottom_unless_told_not_to() {
-        let mut t = with(&[]);
-        t.feed(&b"l\r\n".repeat(20));
-        t.scroll(3);
-        t.feed(b"x");
-        assert_eq!(t.scroll_position().1, 0);
-        let mut t = with(&[("ScrollOnDisp", Value::Int(0))]);
-        t.feed(&b"l\r\n".repeat(20));
-        t.scroll(3);
-        t.feed(b"x");
-        assert_eq!(t.scroll_position().1, 3);
     }
 
     #[test]

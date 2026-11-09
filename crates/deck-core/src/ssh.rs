@@ -990,7 +990,7 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
     }
 
     io.logged_in();
-    let mut status = None;
+    let (mut status, mut signal) = (None, None);
     let mut ping = keepalives(s.ping_seconds());
     let reason = loop {
         tokio::select! {
@@ -1003,16 +1003,43 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
                     (io.events)(Event::ExitStatus(exit_status));
                     status = Some(exit_status);
                 }
-                Some(ChannelMsg::Close) | None => break match status {
-                    Some(0) | None => "Server closed the session.".to_string(),
-                    Some(n) => format!("Session ended with exit status {n}."),
+                Some(ChannelMsg::ExitSignal { signal_name, .. }) => {
+                    io.log(format!("Session sent command exit signal {signal_name:?}"));
+                    // PuTTY's exit code for it: 128 and the signal's number
+                    let number = match signal_name {
+                        russh::Sig::HUP => 1,
+                        russh::Sig::INT => 2,
+                        russh::Sig::QUIT => 3,
+                        russh::Sig::ILL => 4,
+                        russh::Sig::ABRT => 6,
+                        russh::Sig::FPE => 8,
+                        russh::Sig::KILL => 9,
+                        russh::Sig::USR1 => 10,
+                        russh::Sig::SEGV => 11,
+                        russh::Sig::PIPE => 13,
+                        russh::Sig::ALRM => 14,
+                        russh::Sig::TERM => 15,
+                        _ => 0,
+                    };
+                    (io.events)(Event::ExitStatus(128 + number));
+                    signal = Some(signal_name);
+                }
+                // As PuTTY: an end the server reports, with an exit status or
+                // a signal, is a clean one. A connection that just goes, as
+                // when the server reboots, isn't, so a session set to close
+                // only on a clean exit stays, to be restarted.
+                Some(ChannelMsg::Close) | None => break match (status, &signal) {
+                    (Some(0), _) => Ok("Server closed the session.".to_string()),
+                    (Some(n), _) => Ok(format!("Session ended with exit status {n}.")),
+                    (None, Some(sig)) => Ok(format!("Session ended by signal {sig:?}.")),
+                    (None, None) => Err("Remote side unexpectedly closed network connection.".to_string()),
                 },
                 Some(_) => {}
             },
             cmd = io.commands.recv() => match cmd {
                 None | Some(Command::Close) => {
                     channel.close().await.ok();
-                    break "Session closed.".to_string();
+                    break Ok("Session closed.".to_string());
                 }
                 Some(Command::Input(bytes) | Command::Reply(bytes)) => channel.data_bytes(bytes).await?,
                 Some(Command::Special(crate::session::Special::Signal(name))) => channel.signal(russh::Sig::Custom(name.to_string())).await?,
@@ -1036,7 +1063,7 @@ pub(crate) async fn run(target: &Target, store: Arc<dyn HostKeyStore>, io: Io) -
     if Arc::strong_count(&handle) == 1 {
         handle.disconnect(russh::Disconnect::ByApplication, "", "en").await.ok();
     }
-    Ok(reason)
+    reason.map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]

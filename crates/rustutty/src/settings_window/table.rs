@@ -451,7 +451,6 @@ pub fn build(mid: bool, protocol: &str, user: &str) -> Cbox {
     b.check(s, "Display scrollbar", 'd', flag("ScrollBar", true));
     b.check(s, "Display scrollbar in full screen mode", 'i', flag("ScrollBarFullScreen", false));
     b.check(s, "Reset scrollback on keypress", 'k', flag("ScrollOnKey", false));
-    b.check(s, "Reset scrollback on display activity", 'p', flag("ScrollOnDisp", true));
     b.check(s, "Push erased text into scrollback", 'e', flag("EraseToScrollback", true));
 
     // Window/Appearance
@@ -1043,6 +1042,8 @@ mod tests {
         let no_control = [
             "BoldFont", "WideFont", "WideBoldFont", "ShadowBold", "ShadowBoldOffset", "ScrollbarOnLeft", "UTF8Override", "OSXCommandMeta", "OSXOptionMeta",
             "LoginShell", "StampUtmp", "WindowClass", "Present",
+            // output never moves a scrolled-back view, so there's nothing to set
+            "ScrollOnDisp",
         ];
         for k in PUTTY.split_whitespace() {
             assert!(used.contains(k) || no_control.contains(&k), "{k} has no control");

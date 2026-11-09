@@ -32,6 +32,10 @@ The tools differ too:
 - Every session keeps at least 10,000 lines of scrollback. PuTTY's saved
   sessions usually ask for 2000, which a long install or log outgrows, so its
   start would be lost. A session that asks for more gets more.
+- Output never pulls you back to the bottom while you're scrolled up reading:
+  what you're reading stays put as new lines arrive below, and at the bottom
+  the view follows output as usual. PuTTY's **Reset scrollback on display
+  activity** would jump to the bottom on every line, so it isn't offered.
 
 - Pasting anything with a line end asks first, even a single line copied with
   its newline, unless the program is using bracketed paste. **Warn before

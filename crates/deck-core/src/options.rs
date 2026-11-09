@@ -133,7 +133,6 @@ pub const OPTIONS: &[Option_] = &[
     o("Window", "Scrollbar", "ScrollBar", Kind::Flag(true)),
     o("Window", "Scrollbar on the left", "ScrollbarOnLeft", Kind::Flag(false)),
     o("Window", "Scrollbar in full screen", "ScrollBarFullScreen", Kind::Flag(false)),
-    o("Window", "Output scrolls to the bottom", "ScrollOnDisp", Kind::Flag(true)),
     o("Window", "A key press scrolls to the bottom", "ScrollOnKey", Kind::Flag(false)),
     o("Window", "Always on top", "AlwaysOnTop", Kind::Flag(false)),
     o("Window", "Gap around the text, in pixels", "WindowBorder", Kind::Number(1)),
@@ -224,6 +223,7 @@ pub const NOT_DONE: &[(&str, &[&str])] = &[
     ("Workarounds for old servers: russh decides these itself", &["BugChanReq", "BugDeriveKey2", "BugDropStart", "BugFilterKexinit", "BugHMAC2", "BugIgnore1", "BugIgnore2", "BugMaxPkt2", "BugOldGex2", "BugPKSessID2", "BugPlainPW1", "BugRSA1", "BugRSAPad2", "BugRSASHA2CertUserauth", "BugRekey2", "BugWinadj"]),
     ("SSH-1, which russh doesn't have", &["SshProt"]),
     ("The deck always keeps its own Ctrl+Shift+C and V", &["CtrlShiftCV"]),
+    ("Output never pulls a scrolled-back view to the bottom, so reading back isn't interrupted", &["ScrollOnDisp"]),
 ];
 
 #[cfg(test)]

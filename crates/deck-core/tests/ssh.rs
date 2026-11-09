@@ -22,6 +22,8 @@ struct Client {
     rx: UnboundedReceiver<Event>,
     output: String,
     closed: Option<String>,
+    /// Whether it ended cleanly, as CloseOnExit means it.
+    clean: Option<bool>,
     log: Vec<String>,
 }
 
@@ -38,13 +40,16 @@ impl Client {
             let _ = etx.send(e);
         });
         let tx = spawn(&tokio::runtime::Handle::current(), target, store, (80, 24), sink);
-        Client { tx, rx, output: String::new(), closed: None, log: Vec::new() }
+        Client { tx, rx, output: String::new(), closed: None, clean: None, log: Vec::new() }
     }
 
     async fn pump(&mut self) -> bool {
         match self.rx.recv().await {
             Some(Event::Output(b) | Event::Local(b)) => self.output.push_str(&String::from_utf8_lossy(&b)),
-            Some(Event::Closed(why, _)) => self.closed = Some(why),
+            Some(Event::Closed(why, clean)) => {
+                self.closed = Some(why);
+                self.clean = Some(clean);
+            }
             Some(Event::Log(line)) => self.log.push(line),
             Some(Event::ExitStatus(_)) => {}
             None => return false,
@@ -1000,4 +1005,37 @@ async fn rlogin_sends_its_size_when_asked() {
     let (early, size) = server.await.unwrap();
     assert!(!early, "the size didn't go before it was asked for");
     assert_eq!(&size[..4], &[0xff, 0xff, b's', b's'], "{size:?}");
+}
+
+/// A connection that just goes, as when the server reboots, isn't a clean
+/// exit, so a session set to close only on a clean exit stays to be
+/// restarted. An exit the server reports is clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_connection_is_not_a_clean_exit() {
+    let (port, _) = server::start(new_key(Algorithm::Ed25519), vec![MethodKind::Password]).await;
+    // a relay to the server, cut part way through as a reboot would
+    let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let via = relay.local_addr().unwrap().port();
+    let (cut_tx, mut cut_rx) = unbounded_channel::<()>();
+    tokio::spawn(async move {
+        let (mut client, _) = relay.accept().await.unwrap();
+        let mut server = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        tokio::select! {
+            _ = tokio::io::copy_bidirectional(&mut client, &mut server) => {}
+            _ = cut_rx.recv() => {}
+        }
+    });
+    let mut c = Client::open_target(user_target(via, &[]), Arc::new(MemoryStore::default()));
+    c.login().await;
+    cut_tx.send(()).unwrap();
+    let why = c.closed().await;
+    assert_eq!(c.clean, Some(false), "a lost connection isn't clean: {why}");
+    assert!(why.contains("unexpectedly closed"), "{why}");
+
+    // and the server ending it, with an exit status, is
+    let mut c = Client::open_target(user_target(port, &[]), Arc::new(MemoryStore::default()));
+    c.login().await;
+    c.send("exit\r");
+    let why = c.closed().await;
+    assert_eq!(c.clean, Some(true), "{why}");
 }
