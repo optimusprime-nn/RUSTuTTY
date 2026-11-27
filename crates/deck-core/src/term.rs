@@ -247,8 +247,9 @@ pub fn rtf_styled(runs: &[Styled], font: &str, points: u32) -> String {
     format!("{{\\rtf1\\ansi\\deff0{{\\fonttbl{{\\f0\\fmodern {safe_font};}}}}{{\\colortbl ;{table}}}\\f0\\fs{} {body}}}", points * 2)
 }
 
-/// A host asking what colour a palette entry is, and how to word the answer.
-type ColourQuery = (usize, Arc<dyn Fn(alacritty_terminal::vte::ansi::Rgb) -> String + Send + Sync>);
+/// A host asking what colour a palette entry is, and how to word the answer,
+/// with where among the replies its answer goes.
+type ColourQuery = (usize, usize, Arc<dyn Fn(alacritty_terminal::vte::ansi::Rgb) -> String + Send + Sync>);
 
 /// What the terminal library raises: events, and colour queries, which wait
 /// for the palette in `Terminal::feed` to be answered.
@@ -262,7 +263,8 @@ impl EventListener for Listener {
             Event::Title(t) => TermEvent::Title(clean_title(&t)),
             Event::Bell => TermEvent::Bell,
             Event::ColorRequest(i, answer) => {
-                self.1.lock().unwrap().push((i, answer));
+                let at = self.0.lock().unwrap().len();
+                self.1.lock().unwrap().push((at, i, answer));
                 return;
             }
             _ => return,
@@ -570,13 +572,18 @@ impl Terminal {
         if selected.is_some_and(|before| self.term.selection_to_string() != before) {
             self.term.selection = None;
         }
-        // colour queries, answered from the palette as it is now
+        // colour queries, answered from the palette as it is now, in the order
+        // asked: a program that asks for the background then the cursor
+        // position (as gh and other Go prompts do) reads them in that order
         let queries = std::mem::take(&mut *self.events.1.lock().unwrap());
-        for (i, answer) in queries {
+        let mut events = self.events.0.lock().unwrap();
+        for (at, i, answer) in queries.into_iter().rev() {
             let (r, g, b) = self.palette.queried(i, self.term.colors());
             let reply = answer(alacritty_terminal::vte::ansi::Rgb { r, g, b });
-            self.events.0.lock().unwrap().push(TermEvent::Reply(reply.into_bytes()));
+            let at = at.min(events.len());
+            events.insert(at, TermEvent::Reply(reply.into_bytes()));
         }
+        drop(events);
         for a in actions {
             let reply = match a {
                 Action::Reply(b) => b,
@@ -1127,6 +1134,20 @@ mod tests {
         assert!(replies[0].starts_with("\x1b]4;1;rgb:1212/3434/5656"), "{replies:?}");
         t.feed(b"\x1b]R");
         assert_ne!(t.screen().rows[0][0].fg, (0x12, 0x34, 0x56), "OSC R puts the palette back");
+    }
+
+    #[test]
+    fn replies_come_in_the_order_asked() {
+        // gh and other Go prompts ask for the background, then the cursor
+        // position, and take whatever comes after the position as typing
+        let mut t = Terminal::new(10, 2);
+        t.take_events();
+        t.feed(b"\x1b]11;?\x07\x1b[6n\x1b]10;?\x1b\\");
+        let replies: Vec<String> = t.take_events().into_iter().filter_map(|e| if let TermEvent::Reply(r) = e { Some(String::from_utf8_lossy(&r).into_owned()) } else { None }).collect();
+        assert_eq!(replies.len(), 3, "{replies:?}");
+        assert!(replies[0].starts_with("\x1b]11;rgb:"), "{replies:?}");
+        assert_eq!(replies[1], "\x1b[1;1R", "{replies:?}");
+        assert!(replies[2].starts_with("\x1b]10;rgb:"), "{replies:?}");
     }
 
     #[test]
