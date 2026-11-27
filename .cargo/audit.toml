@@ -1,12 +1,6 @@
 # Settings for `cargo audit` and the Audit workflow.
 [advisories]
 ignore = [
-    # The Marvin attack on the rsa crate, which russh uses. rsa 0.10.0 fixes
-    # it, but russh 0.65 still asks for 0.10.0-rc.18. RUSTuTTY only signs with
-    # RSA, once per login, and its Pageant only answers programs running as the
-    # same user. The Audit workflow fails once cargo update can bring in the
-    # fix: then update and remove this line.
-    "RUSTSEC-2023-0071",
     # chrono is unmaintained, with no known flaw. Only russh-sftp uses it, to
     # turn file times into text, so there's nothing to swap it for on our side.
     "RUSTSEC-2026-0543",
