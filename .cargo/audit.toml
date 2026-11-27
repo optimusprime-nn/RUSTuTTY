@@ -7,4 +7,7 @@ ignore = [
     # same user. The Audit workflow fails once cargo update can bring in the
     # fix: then update and remove this line.
     "RUSTSEC-2023-0071",
+    # chrono is unmaintained, with no known flaw. Only russh-sftp uses it, to
+    # turn file times into text, so there's nothing to swap it for on our side.
+    "RUSTSEC-2026-0543",
 ]
