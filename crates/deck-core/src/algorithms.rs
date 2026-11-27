@@ -173,8 +173,20 @@ pub fn preferred(s: &Settings, known: impl Fn(&Algorithm) -> bool) -> anyhow::Re
     if s.b("PreferKnownHostKeys", true) {
         keys.sort_by_key(|k| !known(k));
     }
-    Ok(Preferred { cipher: Cow::Owned(cipher), kex: Cow::Owned(kex), key: Cow::Owned(keys), ..Preferred::DEFAULT })
+    Ok(Preferred { cipher: Cow::Owned(cipher), kex: Cow::Owned(kex), key: Cow::Owned(keys), mac: Cow::Borrowed(MACS), ..Preferred::DEFAULT })
 }
+
+/// PuTTY has no MAC setting and offers SHA-1 after SHA-2 without asking, so
+/// older servers that only have `hmac-sha1` still connect. russh leaves it out
+/// by default.
+const MACS: &[russh::mac::Name] = &[
+    russh::mac::HMAC_SHA512_ETM,
+    russh::mac::HMAC_SHA256_ETM,
+    russh::mac::HMAC_SHA512,
+    russh::mac::HMAC_SHA256,
+    russh::mac::HMAC_SHA1_ETM,
+    russh::mac::HMAC_SHA1,
+];
 
 /// `RekeyBytes`: a number with an optional K, M or G. `0` means never, but
 /// russh's safety limit of 1G still applies.
@@ -340,6 +352,14 @@ mod tests {
         s.set("PreferKnownHostKeys", Value::Int(0));
         let p = preferred(&s, |k| matches!(k, Algorithm::Rsa { .. })).unwrap();
         assert_eq!(p.key[0], Algorithm::Ed25519);
+    }
+
+    #[test]
+    fn sha1_macs_are_offered_after_sha2_as_putty_does() {
+        let p = preferred(&Settings::default(), |_| false).unwrap();
+        let names: Vec<&str> = p.mac.iter().map(|m| m.as_ref()).collect();
+        assert_eq!(names[0], "hmac-sha2-512-etm@openssh.com");
+        assert_eq!(&names[names.len() - 2..], ["hmac-sha1-etm@openssh.com", "hmac-sha1"]);
     }
 
     #[test]
